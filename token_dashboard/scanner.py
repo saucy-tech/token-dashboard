@@ -9,6 +9,26 @@ from typing import List, Optional, Tuple, Union
 from .db import connect
 
 
+INSERT_MSG = """
+INSERT OR REPLACE INTO messages (
+  uuid, parent_uuid, session_id, project_slug, cwd, git_branch, cc_version, entrypoint,
+  type, is_sidechain, agent_id, timestamp, model, stop_reason, prompt_id,
+  input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens,
+  prompt_text, prompt_chars, tool_calls_json
+) VALUES (
+  :uuid, :parent_uuid, :session_id, :project_slug, :cwd, :git_branch, :cc_version, :entrypoint,
+  :type, :is_sidechain, :agent_id, :timestamp, :model, :stop_reason, :prompt_id,
+  :input_tokens, :output_tokens, :cache_read_tokens, :cache_create_5m_tokens, :cache_create_1h_tokens,
+  :prompt_text, :prompt_chars, :tool_calls_json
+)
+"""
+
+INSERT_TOOL = """
+INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, result_tokens, is_error, timestamp)
+VALUES (:message_uuid, :session_id, :project_slug, :tool_name, :target, :result_tokens, :is_error, :timestamp)
+"""
+
+
 _TARGET_FIELDS = {
     "Read":      "file_path",
     "Edit":      "file_path",
@@ -138,3 +158,69 @@ def parse_record(rec: dict, project_slug: str) -> Tuple[dict, List[dict]]:
         t["session_id"]   = msg["session_id"]
         t["project_slug"] = project_slug
     return msg, tools
+
+
+def _project_slug(file_path: Path, projects_root: Path) -> str:
+    rel = file_path.relative_to(projects_root)
+    return rel.parts[0]
+
+
+def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
+    msgs = tools = 0
+    with open(path, "rb") as fb:
+        if start_byte:
+            fb.seek(start_byte)
+        for raw in fb:
+            try:
+                line = raw.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or "uuid" not in rec or "type" not in rec:
+                continue
+            msg, tlist = parse_record(rec, project_slug)
+            if not msg["session_id"] or not msg["timestamp"]:
+                continue
+            conn.execute(INSERT_MSG, msg)
+            for t in tlist:
+                conn.execute(INSERT_TOOL, t)
+                tools += 1
+            msgs += 1
+    return {"messages": msgs, "tools": tools}
+
+
+def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict:
+    root = Path(projects_root)
+    totals = {"messages": 0, "tools": 0, "files": 0}
+    if not root.is_dir():
+        return totals
+    with connect(db_path) as conn:
+        for p in root.rglob("*.jsonl"):
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            row = conn.execute(
+                "SELECT mtime, bytes_read FROM files WHERE path=?", (str(p),)
+            ).fetchone()
+            offset = 0
+            if row and row["mtime"] == stat.st_mtime and row["bytes_read"] == stat.st_size:
+                continue
+            if row and stat.st_size > row["bytes_read"]:
+                offset = row["bytes_read"]
+            slug = _project_slug(p, root)
+            sub = scan_file(p, slug, conn, start_byte=offset)
+            conn.execute(
+                "INSERT OR REPLACE INTO files (path, mtime, bytes_read, scanned_at) VALUES (?, ?, ?, ?)",
+                (str(p), stat.st_mtime, stat.st_size, time.time()),
+            )
+            totals["messages"] += sub["messages"]
+            totals["tools"]    += sub["tools"]
+            totals["files"]    += 1
+        conn.commit()
+    return totals
