@@ -41,7 +41,7 @@ class WalkTests(unittest.TestCase):
         scan_dir(self.proj_root, self.db)
         path = os.path.join(self.proj_root, "C--work-sample", "s1.jsonl")
         with open(path, "a", encoding="utf-8") as f:
-            f.write('\n{"type":"assistant","uuid":"a2","sessionId":"s1","timestamp":"2026-04-10T00:00:03Z","isSidechain":false,"message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":1}}}')
+            f.write('{"type":"assistant","uuid":"a2","sessionId":"s1","timestamp":"2026-04-10T00:00:03Z","isSidechain":false,"message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":1}}}\n')
         n2 = scan_dir(self.proj_root, self.db)
         self.assertEqual(n2["messages"], 1)
 

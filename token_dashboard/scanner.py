@@ -185,34 +185,61 @@ def _evict_prior_snapshots(conn, session_id: str, message_id: str, keep_uuid: st
 
 
 def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
+    """Ingest new lines from a JSONL file starting at ``start_byte``.
+
+    Returns message/tool counts plus ``end_offset`` — the byte offset just
+    past the last fully-parsed line. Callers persist ``end_offset`` as the
+    file's high-water mark so a line partially flushed at EOF gets re-read
+    once it completes.
+    """
     msgs = tools = 0
+    end_offset = start_byte
     with open(path, "rb") as fb:
         if start_byte:
             fb.seek(start_byte)
-        for raw in fb:
+        while True:
+            raw = fb.readline()
+            if not raw:
+                break  # EOF
+            if not raw.endswith(b"\n"):
+                # Partial line — Claude Code is mid-flush. Leave the
+                # high-water mark behind the line start so we re-read it
+                # once the write completes.
+                break
+            line_end = fb.tell()
             try:
                 line = raw.decode("utf-8", errors="replace").strip()
             except Exception:
+                end_offset = line_end
                 continue
             if not line:
+                end_offset = line_end
                 continue
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
+                end_offset = line_end
                 continue
             if not isinstance(rec, dict) or "uuid" not in rec or "type" not in rec:
+                end_offset = line_end
                 continue
             msg, tlist = parse_record(rec, project_slug)
             if not msg["session_id"] or not msg["timestamp"]:
+                end_offset = line_end
                 continue
             if msg["message_id"]:
                 _evict_prior_snapshots(conn, msg["session_id"], msg["message_id"], msg["uuid"])
             conn.execute(INSERT_MSG, msg)
+            # tool_calls has no natural unique key; clear any prior rows for
+            # this uuid so full rescans stay idempotent instead of
+            # duplicating rows.
+            conn.execute("DELETE FROM tool_calls WHERE message_uuid=?", (msg["uuid"],))
             for t in tlist:
                 conn.execute(INSERT_TOOL, t)
                 tools += 1
             msgs += 1
-    return {"messages": msgs, "tools": tools}
+            end_offset = line_end
+    return {"messages": msgs, "tools": tools, "end_offset": end_offset}
 
 
 def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict:
@@ -236,9 +263,12 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
                 offset = row["bytes_read"]
             slug = _project_slug(p, root)
             sub = scan_file(p, slug, conn, start_byte=offset)
+            # Persist the byte offset of the last fully-parsed line (not
+            # st_size) so a partial line mid-flush is retried on the next
+            # scan instead of being skipped over.
             conn.execute(
                 "INSERT OR REPLACE INTO files (path, mtime, bytes_read, scanned_at) VALUES (?, ?, ?, ?)",
-                (str(p), stat.st_mtime, stat.st_size, time.time()),
+                (str(p), stat.st_mtime, sub["end_offset"], time.time()),
             )
             totals["messages"] += sub["messages"]
             totals["tools"]    += sub["tools"]
