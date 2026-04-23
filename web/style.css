@@ -88,6 +88,7 @@ main#app { padding: 24px 20px; max-width: 1400px; margin: 0 auto; }
 @media (max-width: 720px) {
   .row.cols-7 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .row.cols-4 { grid-template-columns: repeat(2, 1fr); }
+  .row.cols-3 { grid-template-columns: 1fr; }
   .row.cols-2 { grid-template-columns: 1fr; }
 }
 
@@ -143,6 +144,34 @@ td.mono { font-family: var(--mono); color: var(--muted); }
 .badge.provider-claude { color: #F6B26B; border-color: rgba(246,178,107,0.3); background: rgba(246,178,107,0.08); }
 .badge.provider-codex  { color: #6FD1C2; border-color: rgba(111,209,194,0.3); background: rgba(111,209,194,0.08); }
 .badge.provider-warp   { color: #FF7A59; border-color: rgba(255,122,89,0.3); background: rgba(255,122,89,0.08); }
+
+/* provider comparison */
+.provider-compare-card { min-height: 166px; }
+.provider-total {
+  font-family: var(--mono);
+  font-size: 28px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.provider-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.delta-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.delta-stack > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
 
 /* drawer */
 #drawer .card { margin-top: 16px; border-color: var(--border-2); }

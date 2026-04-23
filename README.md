@@ -87,11 +87,12 @@ python3 cli.py dashboard --no-codex  # scan Claude only
 
 Change the port: `PORT=9000 python3 cli.py dashboard`.
 
-## The 7 tabs
+## The 8 tabs
 
 The dashboard is a single page with a hash-router tab bar across the top. Each tab is backed by its own JSON API under `/api/`:
 
 - **Overview** — all-time input/output/cache tokens, sessions, turns, provider summaries, estimated cost on your chosen plan, daily work and cache-read charts, tokens-by-project, token share by model, top tools by call count, and recent sessions. This is the landing tab.
+- **Comparison** — Claude vs. Codex deltas for sessions, turns, billable tokens, cache reads, daily usage, and model mix.
 - **Prompts** — your most expensive user prompts ranked by tokens. Click any row to see the assistant response, tool calls made, and the size of each tool result.
 - **Sessions** — turn-by-turn view of any single session, with per-turn tokens and tool calls.
 - **Projects** — per-project comparison: tokens, session counts, and which files were touched most.
