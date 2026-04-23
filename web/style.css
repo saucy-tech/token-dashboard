@@ -111,7 +111,34 @@ main#app { padding: 24px 20px; max-width: 1400px; margin: 0 auto; }
 .kpi .delta { font-family: var(--mono); font-size: 12px; margin-top: 4px; }
 .kpi .delta.up   { color: var(--good); }
 .kpi .delta.down { color: var(--bad);  }
+.kpi .delta.warn { color: var(--warn); }
 .kpi .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.trend-kpi .value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.overview-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 24px 0 12px;
+}
+.overview-section-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.trend-budget {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.trend-budget input {
+  width: 96px;
+  min-height: 31px;
+}
 
 /* tables */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -225,13 +252,15 @@ td.mono { font-family: var(--mono); color: var(--muted); }
 }
 
 /* buttons */
-button, select {
+button, select, input {
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 12px; font-family: var(--sans); font-size: 13px;
+}
+button, select {
   cursor: pointer;
 }
-button:hover, select:hover { border-color: var(--border-2); }
+button:hover, select:hover, input:hover { border-color: var(--border-2); }
 button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 button.primary:hover { background: #5BA8FF; }
 button.ghost { background: transparent; color: var(--muted); }

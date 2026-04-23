@@ -17,6 +17,7 @@ from .db import (
     overview_totals, expensive_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
+    ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
 )
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
@@ -112,6 +113,185 @@ def _export_rows(handler, rows, filename_base: str, fmt: str) -> None:
     return _send_error(handler, 404, "unsupported export format")
 
 
+def _billable_tokens(row: dict) -> int:
+    return (
+        int(row.get("input_tokens") or 0)
+        + int(row.get("output_tokens") or 0)
+        + int(row.get("cache_create_5m_tokens") or 0)
+        + int(row.get("cache_create_1h_tokens") or 0)
+    )
+
+
+def _row_cost(model: str, row: dict, pricing: dict) -> dict:
+    return cost_for(model, {
+        "input_tokens": int(row.get("input_tokens") or 0),
+        "output_tokens": int(row.get("output_tokens") or 0),
+        "cache_read_tokens": int(row.get("cache_read_tokens") or 0),
+        "cache_create_5m_tokens": int(row.get("cache_create_5m_tokens") or 0),
+        "cache_create_1h_tokens": int(row.get("cache_create_1h_tokens") or 0),
+    }, pricing)
+
+
+def _delta(current, previous) -> dict:
+    if current is None or previous is None:
+        return {"current": current, "previous": previous, "absolute": None, "pct": None}
+    absolute = current - previous
+    pct = None if previous == 0 else absolute / previous
+    return {"current": current, "previous": previous, "absolute": absolute, "pct": pct}
+
+
+def _add_model_costs(rollups: list, model_rows: list, pricing: dict) -> None:
+    by_week = {}
+    for row in model_rows:
+        priced = _row_cost(row["dimension_key"], row, pricing)
+        bucket = by_week.setdefault(row["start_date"], {
+            "cost_usd": 0.0,
+            "priced": 0,
+            "unpriced": 0,
+            "estimated": 0,
+        })
+        if priced["usd"] is None:
+            bucket["unpriced"] += 1
+        else:
+            bucket["cost_usd"] += priced["usd"]
+            bucket["priced"] += 1
+            if priced["estimated"]:
+                bucket["estimated"] += 1
+    for row in rollups:
+        cost = by_week.get(row["start_date"], {})
+        row["billable_tokens"] = _billable_tokens(row)
+        row["cost_usd"] = round(cost.get("cost_usd", 0.0), 4) if cost.get("priced") else None
+        row["cost_partial"] = bool(cost.get("unpriced"))
+        row["cost_estimated"] = bool(cost.get("estimated"))
+
+
+def _aggregate_rows(rows: list, pricing: dict, cost_model_from_key=None, limit: int = 8) -> list:
+    grouped = {}
+    for row in rows:
+        key = row["dimension_key"]
+        item = grouped.setdefault(key, {
+            "key": key,
+            "label": row["dimension_label"],
+            "sessions": 0,
+            "turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_create_5m_tokens": 0,
+            "cache_create_1h_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_partial": False,
+            "cost_estimated": False,
+            "priced": 0,
+        })
+        item["sessions"] += int(row["sessions"] or 0)
+        item["turns"] += int(row["turns"] or 0)
+        for col in (
+            "input_tokens", "output_tokens", "cache_read_tokens",
+            "cache_create_5m_tokens", "cache_create_1h_tokens",
+        ):
+            item[col] += int(row[col] or 0)
+        model = cost_model_from_key(key) if cost_model_from_key else key
+        priced = _row_cost(model, row, pricing)
+        if priced["usd"] is None:
+            item["cost_partial"] = True
+        else:
+            item["cost_usd"] += priced["usd"]
+            item["priced"] += 1
+            if priced["estimated"]:
+                item["cost_estimated"] = True
+    result = []
+    for item in grouped.values():
+        item["billable_tokens"] = _billable_tokens(item)
+        item["cost_usd"] = round(item["cost_usd"], 4) if item.pop("priced") else None
+        result.append(item)
+    result.sort(key=lambda r: (r["cost_usd"] is not None, r["cost_usd"] or 0, r["billable_tokens"]), reverse=True)
+    return result[:limit]
+
+
+def _series_rows(rows: list, rollups: list, limit: int = 6) -> list:
+    weeks = [r["start_date"] for r in rollups]
+    totals = {}
+    labels = {}
+    by_key_week = {}
+    for row in rows:
+        key = row["dimension_key"]
+        labels[key] = row["dimension_label"]
+        value = _billable_tokens(row)
+        totals[key] = totals.get(key, 0) + value
+        by_key_week.setdefault(key, {})[row["start_date"]] = value
+    top = sorted(totals, key=totals.get, reverse=True)[:limit]
+    return [
+        {
+            "key": key,
+            "label": labels.get(key, key),
+            "values": [by_key_week.get(key, {}).get(week, 0) for week in weeks],
+        }
+        for key in top
+    ]
+
+
+def _trends_payload(db_path: str, pricing: dict, provider: Optional[str], weeks: int, budget_raw) -> dict:
+    ensure_usage_snapshots(db_path)
+    rollups = snapshot_rollups(db_path, period="week", provider=provider, limit=weeks + 1)
+    visible = rollups[-weeks:] if len(rollups) > weeks else rollups
+    since_start = visible[0]["start_date"] if visible else None
+    model_rows = snapshot_dimension_rows(db_path, "model", "week", provider=provider, since_start=since_start)
+    project_rows = snapshot_dimension_rows(db_path, "project", "week", provider=provider, since_start=since_start)
+    project_model_rows = snapshot_dimension_rows(db_path, "project_model", "week", provider=provider, since_start=since_start)
+    provider_rows = snapshot_dimension_rows(db_path, "provider", "week", provider=None, since_start=since_start)
+
+    _add_model_costs(visible, model_rows, pricing)
+    current = visible[-1] if visible else {}
+    previous = visible[-2] if len(visible) > 1 else {}
+    budget_usd = None
+    try:
+        budget_usd = float(budget_raw) if budget_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        budget_usd = None
+    if budget_usd is not None and budget_usd <= 0:
+        budget_usd = None
+    budget = None
+    if budget_usd is not None:
+        current_cost = current.get("cost_usd")
+        pct = None if current_cost is None else current_cost / budget_usd
+        budget = {
+            "weekly_budget_usd": budget_usd,
+            "current_week_cost_usd": current_cost,
+            "pct": pct,
+            "status": "unknown" if pct is None else ("over" if pct >= 1 else ("near" if pct >= 0.8 else "ok")),
+        }
+
+    return {
+        "weeks": visible,
+        "deltas": {
+            "sessions": _delta(current.get("sessions"), previous.get("sessions")),
+            "turns": _delta(current.get("turns"), previous.get("turns")),
+            "billable_tokens": _delta(current.get("billable_tokens"), previous.get("billable_tokens")),
+            "cost_usd": _delta(current.get("cost_usd"), previous.get("cost_usd")),
+        },
+        "top_cost_drivers": _aggregate_rows(
+            project_model_rows,
+            pricing,
+            cost_model_from_key=lambda key: key.split("\t", 1)[1] if "\t" in key else key,
+            limit=8,
+        ),
+        "project_series": {
+            "weeks": [r["start_date"] for r in visible],
+            "series": _series_rows(project_rows, visible),
+        },
+        "model_series": {
+            "weeks": [r["start_date"] for r in visible],
+            "series": _series_rows(model_rows, visible),
+        },
+        "provider_series": {
+            "weeks": [r["start_date"] for r in visible],
+            "series": _series_rows(provider_rows, visible, limit=4),
+        },
+        "budget": budget,
+    }
+
+
 def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
     pricing = load_pricing(PRICING_JSON)
 
@@ -156,6 +336,19 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 totals["unpriced_models"] = unpriced
                 totals["estimated_models"] = estimated
                 return _send_json(self, totals)
+            if path == "/api/trends":
+                weeks = _clamp_limit(qs.get("weeks", ["12"])[0], 12)
+                weeks = min(weeks, 52)
+                return _send_json(
+                    self,
+                    _trends_payload(
+                        db_path,
+                        pricing,
+                        provider=provider,
+                        weeks=weeks,
+                        budget_raw=qs.get("budget_usd", [None])[0],
+                    ),
+                )
             if path.startswith("/api/export/"):
                 target = path[len("/api/export/"):]
                 if "." not in target:

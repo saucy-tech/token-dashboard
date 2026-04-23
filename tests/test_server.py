@@ -63,6 +63,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(body["sessions"], 1)
         self.assertEqual(body["turns"], 1)
 
+    def test_trends_json_includes_weekly_rollups(self):
+        body = json.loads(self._get("/api/trends?weeks=4&budget_usd=10"))
+
+        self.assertIn("weeks", body)
+        self.assertIn("deltas", body)
+        self.assertIn("top_cost_drivers", body)
+        self.assertEqual(body["weeks"][-1]["start_date"], "2026-04-13")
+        self.assertEqual(body["budget"]["weekly_budget_usd"], 10.0)
+        self.assertGreaterEqual(body["weeks"][-1]["billable_tokens"], 6)
+
     def test_overview_flags_tier_estimated_cost(self):
         with sqlite3.connect(self.db) as c:
             c.execute("INSERT INTO messages (uuid, parent_uuid, session_id, project_slug, provider, type, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens) VALUES ('a3',NULL,'s3','p3','claude','assistant','2026-04-19T00:02:01Z','claude-sonnet-9-9-experimental',1000,1000,0,0,0)")

@@ -91,7 +91,7 @@ Change the port: `PORT=9000 python3 cli.py dashboard`.
 
 The dashboard is a single page with a hash-router tab bar across the top. Each tab is backed by its own JSON API under `/api/`:
 
-- **Overview** — all-time input/output/cache tokens, sessions, turns, provider summaries, API-equivalent estimated cost, daily work and cache-read charts, tokens-by-project, token share by model, top tools by call count, and recent sessions. This is the landing tab.
+- **Overview** — all-time input/output/cache tokens, sessions, turns, provider summaries, API-equivalent estimated cost, weekly trend rollups with week-over-week deltas and optional budget thresholds, daily work and cache-read charts, project/model changes over time, top cost drivers, top tools by call count, and recent sessions. This is the landing tab.
 - **Comparison** — Claude vs. Codex deltas for sessions, turns, billable tokens, cache reads, daily usage, and model mix.
 - **Prompts** — your most expensive user prompts ranked by tokens. Click any row to see the assistant response, tool calls made, and the size of each tool result.
 - **Sessions** — turn-by-turn view of any single session, with per-turn tokens and tool calls.

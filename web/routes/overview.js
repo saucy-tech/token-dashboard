@@ -10,7 +10,7 @@ import {
   withQuery,
   writeHashParams,
 } from '/web/app.js';
-import { barChart, donutChart, groupedBarChart, stackedBarChart } from '/web/charts.js';
+import { barChart, donutChart, groupedBarChart, lineChart, stackedBarChart } from '/web/charts.js';
 
 const RANGES = [
   { key: '7d',  label: '7d',  days: 7 },
@@ -61,9 +61,15 @@ export default async function (root) {
   const provider = readProvider();
   const since = sinceIso(range);
   const params = queryParams(since, provider);
+  const weeklyBudget = readWeeklyBudget();
 
-  const [totals, projects, sessions, tools, daily, byModel, providers, sources] = await Promise.all([
+  const [totals, trends, projects, sessions, tools, daily, byModel, providers, sources] = await Promise.all([
     api(withQuery('/api/overview', params)),
+    api(withQuery('/api/trends', {
+      provider: provider.key === 'all' ? null : provider.key,
+      weeks: 12,
+      budget_usd: weeklyBudget,
+    })),
     api(withQuery('/api/projects', params)),
     api(withQuery('/api/sessions', { ...params, limit: 10 })),
     api(withQuery('/api/tools', params)),
@@ -106,6 +112,9 @@ export default async function (root) {
   }).join('');
 
   const costSub = costSubtitle(totals);
+  const trendWeeks = trends.weeks || [];
+  const latestWeek = trendWeeks[trendWeeks.length - 1] || {};
+  const budget = trends.budget;
 
   const rangeTabs = `
     <div class="range-tabs" role="tablist">
@@ -140,6 +149,49 @@ export default async function (root) {
         <div class="label">API-equiv. cost</div>
         <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
         ${costSub}
+      </div>
+    </div>
+
+    <div class="overview-section-head">
+      <h3>Trends</h3>
+      <div class="trend-budget">
+        <label for="weekly-budget">Weekly budget</label>
+        <input id="weekly-budget" type="number" min="0" step="1" inputmode="decimal" value="${weeklyBudget ?? ''}" placeholder="—">
+        <button class="ghost" id="save-weekly-budget">Save</button>
+      </div>
+    </div>
+
+    <div class="row cols-4">
+      ${trendKpi('Current week', latestWeek.start_date || '—', latestWeek.end_date ? `through ${latestWeek.end_date}` : 'weekly rollup')}
+      ${trendKpi('Billable tokens', fmt.compact(latestWeek.billable_tokens), deltaText(trends.deltas?.billable_tokens), deltaClass(trends.deltas?.billable_tokens))}
+      ${trendKpi('API-equiv. cost', fmt.usd(latestWeek.cost_usd), deltaText(trends.deltas?.cost_usd, fmt.usd), deltaClass(trends.deltas?.cost_usd))}
+      ${budgetKpi(budget)}
+    </div>
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card">
+        <h3>Weekly rollups</h3>
+        <div id="ch-weekly-rollups" style="height:280px"></div>
+      </div>
+      <div class="card">
+        <h3>Top cost drivers</h3>
+        <table>
+          <thead><tr><th>driver</th><th class="num">tokens</th><th class="num">cost</th></tr></thead>
+          <tbody>
+            ${driverRows(trends.top_cost_drivers || [])}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card">
+        <h3>Projects over time</h3>
+        <div id="ch-project-trends" style="height:300px"></div>
+      </div>
+      <div class="card">
+        <h3>Models over time</h3>
+        <div id="ch-model-trends" style="height:300px"></div>
       </div>
     </div>
 
@@ -213,6 +265,42 @@ export default async function (root) {
     await api('/api/scan');
     window.dispatchEvent(new Event('hashchange'));
   });
+  root.querySelector('#save-weekly-budget')?.addEventListener('click', () => {
+    const raw = root.querySelector('#weekly-budget')?.value || '';
+    const value = Number(raw);
+    if (!raw || !Number.isFinite(value) || value <= 0) {
+      localStorage.removeItem('td.weekly-budget-usd');
+    } else {
+      localStorage.setItem('td.weekly-budget-usd', String(value));
+    }
+    window.dispatchEvent(new Event('hashchange'));
+  });
+
+  lineChart(document.getElementById('ch-weekly-rollups'), {
+    x: trendWeeks.map(w => w.start_date),
+    series: [
+      { name: 'billable', data: trendWeeks.map(w => w.billable_tokens || 0), color: '#4A9EFF' },
+      { name: 'cache read', data: trendWeeks.map(w => w.cache_read_tokens || 0), color: '#3FB68B' },
+    ],
+  });
+
+  lineChart(document.getElementById('ch-project-trends'), {
+    x: trends.project_series?.weeks || [],
+    series: (trends.project_series?.series || []).map((s, i) => ({
+      name: fmt.short(s.label, 22),
+      data: s.values,
+      color: ['#4A9EFF', '#7C5CFF', '#3FB68B', '#E8A23B', '#E5484D', '#5BCEDA'][i % 6],
+    })),
+  });
+
+  lineChart(document.getElementById('ch-model-trends'), {
+    x: trends.model_series?.weeks || [],
+    series: (trends.model_series?.series || []).map((s, i) => ({
+      name: fmt.modelShort(s.label),
+      data: s.values,
+      color: ['#7C5CFF', '#4A9EFF', '#3FB68B', '#E8A23B', '#E5484D', '#5BCEDA'][i % 6],
+    })),
+  });
 
   // Your daily work — billable tokens (input + output + cache create)
   stackedBarChart(document.getElementById('ch-daily-billable'), {
@@ -261,6 +349,54 @@ export default async function (root) {
     values: topTools.map(t => t.calls),
     color: '#7C5CFF',
   });
+}
+
+function readWeeklyBudget() {
+  const raw = localStorage.getItem('td.weekly-budget-usd');
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function trendKpi(label, value, sub = '', cls = '') {
+  return `
+    <div class="card kpi trend-kpi">
+      <div class="label">${fmt.htmlSafe(label)}</div>
+      <div class="value" title="${fmt.htmlSafe(String(value ?? '—'))}">${fmt.htmlSafe(String(value ?? '—'))}</div>
+      ${sub ? `<div class="delta ${cls}">${fmt.htmlSafe(sub)}</div>` : ''}
+    </div>`;
+}
+
+function budgetKpi(budget) {
+  if (!budget) {
+    return trendKpi('Budget', '—', 'no threshold set');
+  }
+  const pct = budget.pct == null ? '—' : Math.round(budget.pct * 100) + '%';
+  const cls = budget.status === 'over' ? 'down' : (budget.status === 'near' ? 'warn' : 'up');
+  return trendKpi('Budget', pct, `${fmt.usd(budget.current_week_cost_usd)} of ${fmt.usd(budget.weekly_budget_usd)}`, cls);
+}
+
+function deltaClass(delta) {
+  if (!delta || delta.absolute == null || delta.absolute === 0) return '';
+  return delta.absolute > 0 ? 'up' : 'down';
+}
+
+function deltaText(delta, formatter = fmt.compact) {
+  if (!delta || delta.absolute == null) return 'no previous week';
+  const abs = delta.absolute || 0;
+  const sign = abs > 0 ? '+' : '';
+  const pct = delta.pct == null ? '' : ` (${sign}${Math.round(delta.pct * 100)}%)`;
+  return `${sign}${formatter(abs)} vs prev${pct}`;
+}
+
+function driverRows(rows) {
+  if (!rows.length) return '<tr><td colspan="3" class="muted">no weekly snapshot data yet</td></tr>';
+  return rows.map(row => `
+    <tr>
+      <td>${fmt.htmlSafe(row.label || row.key)}</td>
+      <td class="num">${fmt.compact(row.billable_tokens)}</td>
+      <td class="num">${fmt.usd(row.cost_usd)}${row.cost_partial ? '<span class="muted">*</span>' : ''}</td>
+    </tr>`).join('');
 }
 
 function costSubtitle(totals) {

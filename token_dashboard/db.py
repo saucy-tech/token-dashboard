@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -76,6 +77,31 @@ CREATE TABLE IF NOT EXISTS plan (
 CREATE TABLE IF NOT EXISTS dismissed_tips (
   tip_key       TEXT PRIMARY KEY,
   dismissed_at  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_snapshots (
+  period                  TEXT NOT NULL,
+  start_date              TEXT NOT NULL,
+  end_date                TEXT NOT NULL,
+  provider                TEXT NOT NULL,
+  dimension               TEXT NOT NULL,
+  dimension_key           TEXT NOT NULL,
+  dimension_label         TEXT NOT NULL,
+  sessions                INTEGER NOT NULL DEFAULT 0,
+  turns                   INTEGER NOT NULL DEFAULT 0,
+  input_tokens            INTEGER NOT NULL DEFAULT 0,
+  output_tokens           INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens       INTEGER NOT NULL DEFAULT 0,
+  cache_create_5m_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_create_1h_tokens  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (period, start_date, provider, dimension, dimension_key)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_snapshots_scope
+  ON usage_snapshots(period, provider, dimension, start_date);
+
+CREATE TABLE IF NOT EXISTS usage_snapshot_meta (
+  k TEXT PRIMARY KEY,
+  v TEXT
 );
 """
 
@@ -492,3 +518,241 @@ def provider_breakdown(db_path, since=None, until=None, provider: Optional[str] 
     """
     with connect(db_path) as c:
         return [dict(r) for r in c.execute(sql, [*args, *prov_args])]
+
+
+def ensure_usage_snapshots(db_path) -> dict:
+    """Refresh cached daily/weekly aggregates only when message totals changed."""
+    with connect(db_path) as c:
+        signature = _snapshot_signature(c)
+        row = c.execute(
+            "SELECT v FROM usage_snapshot_meta WHERE k='message_signature'"
+        ).fetchone()
+        if row and row["v"] == signature:
+            return {"rebuilt": False, "signature": json.loads(signature)}
+        _rebuild_usage_snapshots(c)
+        c.execute(
+            "INSERT OR REPLACE INTO usage_snapshot_meta (k, v) VALUES ('message_signature', ?)",
+            (signature,),
+        )
+        c.commit()
+        return {"rebuilt": True, "signature": json.loads(signature)}
+
+
+def snapshot_rollups(db_path, period: str = "week", provider: Optional[str] = None, limit: int = 12) -> list:
+    provider_key = _normalize_provider(provider) or "all"
+    period = "day" if period == "day" else "week"
+    limit = max(1, min(int(limit or 12), 260))
+    sql = """
+      SELECT *
+        FROM usage_snapshots
+       WHERE period = ?
+         AND provider = ?
+         AND dimension = 'total'
+       ORDER BY start_date DESC
+       LIMIT ?
+    """
+    with connect(db_path) as c:
+        rows = [dict(r) for r in c.execute(sql, (period, provider_key, limit))]
+    rows.reverse()
+    return rows
+
+
+def snapshot_dimension_rows(
+    db_path,
+    dimension: str,
+    period: str = "week",
+    provider: Optional[str] = None,
+    since_start: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> list:
+    if dimension not in {"project", "model", "provider", "project_model"}:
+        raise ValueError("unsupported snapshot dimension")
+    provider_key = _normalize_provider(provider) or "all"
+    period = "day" if period == "day" else "week"
+    where = [
+        "period = ?",
+        "provider = ?",
+        "dimension = ?",
+    ]
+    args = [period, provider_key, dimension]
+    if since_start:
+        where.append("start_date >= ?")
+        args.append(since_start)
+    sql = f"""
+      SELECT *
+        FROM usage_snapshots
+       WHERE {" AND ".join(where)}
+       ORDER BY start_date ASC
+    """
+    rows_limit = None
+    if limit is not None:
+        rows_limit = max(1, min(int(limit), 1000))
+        sql += " LIMIT ?"
+        args.append(rows_limit)
+    with connect(db_path) as c:
+        return [dict(r) for r in c.execute(sql, args)]
+
+
+def _snapshot_signature(conn) -> str:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS messages,
+               COUNT(DISTINCT session_id) AS sessions,
+               COALESCE(MAX(timestamp), '') AS max_timestamp,
+               COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens
+                 + cache_create_5m_tokens + cache_create_1h_tokens), 0) AS token_sum
+          FROM messages
+        """
+    ).fetchone()
+    return json.dumps(dict(row), sort_keys=True)
+
+
+def _rebuild_usage_snapshots(conn) -> None:
+    conn.execute("DELETE FROM usage_snapshots")
+    project_labels = _project_labels(conn)
+
+    for period, start_expr, end_modifier in (
+        ("day", "substr(timestamp, 1, 10)", "+1 day"),
+        (
+            "week",
+            "date(substr(timestamp, 1, 10), printf('-%d days', (CAST(strftime('%w', substr(timestamp, 1, 10)) AS INTEGER) + 6) % 7))",
+            "+7 days",
+        ),
+    ):
+        _insert_snapshot_dimension(
+            conn,
+            period,
+            start_expr,
+            end_modifier,
+            dimension="total",
+            dimension_expr="'total'",
+            label_expr="'All usage'",
+            where="timestamp IS NOT NULL",
+        )
+        _insert_snapshot_dimension(
+            conn,
+            period,
+            start_expr,
+            end_modifier,
+            dimension="provider",
+            dimension_expr="COALESCE(provider, 'claude')",
+            label_expr="COALESCE(provider, 'claude')",
+            where="timestamp IS NOT NULL",
+            all_scope_only=True,
+        )
+        _insert_snapshot_dimension(
+            conn,
+            period,
+            start_expr,
+            end_modifier,
+            dimension="project",
+            dimension_expr="project_slug",
+            label_expr="project_slug",
+            where="timestamp IS NOT NULL",
+        )
+        _insert_snapshot_dimension(
+            conn,
+            period,
+            start_expr,
+            end_modifier,
+            dimension="model",
+            dimension_expr="COALESCE(model, 'unknown')",
+            label_expr="COALESCE(model, 'unknown')",
+            where="timestamp IS NOT NULL AND type = 'assistant'",
+        )
+        _insert_snapshot_dimension(
+            conn,
+            period,
+            start_expr,
+            end_modifier,
+            dimension="project_model",
+            dimension_expr="project_slug || char(9) || COALESCE(model, 'unknown')",
+            label_expr="project_slug || ' · ' || COALESCE(model, 'unknown')",
+            where="timestamp IS NOT NULL AND type = 'assistant'",
+        )
+
+    for slug, label in project_labels.items():
+        conn.execute(
+            """
+            UPDATE usage_snapshots
+               SET dimension_label = ?
+             WHERE dimension = 'project'
+               AND dimension_key = ?
+            """,
+            (label, slug),
+        )
+        conn.execute(
+            """
+            UPDATE usage_snapshots
+               SET dimension_label = ? || ' · ' || substr(dimension_key, instr(dimension_key, char(9)) + 1)
+             WHERE dimension = 'project_model'
+               AND substr(dimension_key, 1, instr(dimension_key, char(9)) - 1) = ?
+            """,
+            (label, slug),
+        )
+
+
+def _project_labels(conn) -> dict:
+    rows = conn.execute(
+        """
+        SELECT project_slug, cwd
+          FROM messages
+         WHERE project_slug IS NOT NULL
+           AND cwd IS NOT NULL
+         GROUP BY project_slug, cwd
+        """
+    ).fetchall()
+    by_slug = {}
+    for row in rows:
+        by_slug.setdefault(row["project_slug"], []).append(row["cwd"])
+    labels = {}
+    slugs = set(by_slug)
+    slugs.update(
+        row["project_slug"]
+        for row in conn.execute("SELECT DISTINCT project_slug FROM messages WHERE project_slug IS NOT NULL")
+    )
+    for slug in slugs:
+        labels[slug] = best_project_name(by_slug.get(slug, []), slug)
+    return labels
+
+
+def _insert_snapshot_dimension(
+    conn,
+    period: str,
+    start_expr: str,
+    end_modifier: str,
+    dimension: str,
+    dimension_expr: str,
+    label_expr: str,
+    where: str,
+    all_scope_only: bool = False,
+) -> None:
+    scopes = [("'all'", [])]
+    if not all_scope_only:
+        scopes.append(("COALESCE(provider, 'claude')", []))
+    for provider_expr, args in scopes:
+        sql = f"""
+          INSERT OR REPLACE INTO usage_snapshots (
+            period, start_date, end_date, provider, dimension, dimension_key, dimension_label,
+            sessions, turns, input_tokens, output_tokens, cache_read_tokens,
+            cache_create_5m_tokens, cache_create_1h_tokens
+          )
+          SELECT ? AS period,
+                 {start_expr} AS start_date,
+                 date({start_expr}, ?) AS end_date,
+                 {provider_expr} AS provider,
+                 ? AS dimension,
+                 {dimension_expr} AS dimension_key,
+                 {label_expr} AS dimension_label,
+                 COUNT(DISTINCT session_id) AS sessions,
+                 SUM(CASE WHEN type = 'user' THEN 1 ELSE 0 END) AS turns,
+                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                 COALESCE(SUM(cache_create_5m_tokens), 0) AS cache_create_5m_tokens,
+                 COALESCE(SUM(cache_create_1h_tokens), 0) AS cache_create_1h_tokens
+            FROM messages
+           WHERE {where}
+           GROUP BY start_date, {provider_expr}, dimension_key
+        """
+        conn.execute(sql, [period, end_modifier, dimension, *args])

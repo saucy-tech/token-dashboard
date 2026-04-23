@@ -85,7 +85,7 @@ def cmd_dashboard(args):
     from token_dashboard.server import run
 
     host = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", "8080"))
+    port = args.port
     url = f"http://{host}:{port}/"
     if not args.no_open:
         webbrowser.open(url)
@@ -109,6 +109,7 @@ def main():
     d = sub.add_parser("dashboard", parents=[common])
     d.add_argument("--no-scan", action="store_true")
     d.add_argument("--no-open", action="store_true")
+    d.add_argument("--port", type=int, default=8080)
     d.set_defaults(func=cmd_dashboard)
     args = p.parse_args()
     args.func(args)

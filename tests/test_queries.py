@@ -7,7 +7,8 @@ from token_dashboard.db import (
     overview_totals, expensive_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, project_name_for,
-    provider_breakdown, skill_breakdown,
+    provider_breakdown, skill_breakdown, ensure_usage_snapshots,
+    snapshot_rollups, snapshot_dimension_rows,
 )
 
 
@@ -144,6 +145,32 @@ class QueryTests(unittest.TestCase):
         rows = provider_breakdown(self.db, provider="codex")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["provider"], "codex")
+
+    def test_usage_snapshots_cache_weekly_rollups(self):
+        first = ensure_usage_snapshots(self.db)
+        second = ensure_usage_snapshots(self.db)
+
+        self.assertTrue(first["rebuilt"])
+        self.assertFalse(second["rebuilt"])
+        rows = snapshot_rollups(self.db, period="week", limit=4)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["start_date"], "2026-04-06")
+        self.assertEqual(rows[0]["sessions"], 2)
+        self.assertEqual(
+            rows[0]["input_tokens"] + rows[0]["output_tokens"],
+            310,
+        )
+
+    def test_usage_snapshots_keep_project_and_model_series(self):
+        ensure_usage_snapshots(self.db)
+
+        projects = snapshot_dimension_rows(self.db, "project", "week")
+        models = snapshot_dimension_rows(self.db, "model", "week", provider="codex")
+
+        by_project = {row["dimension_key"]: row for row in projects}
+        self.assertEqual(by_project["projA"]["dimension_label"], "projA")
+        self.assertEqual(by_project["projB"]["sessions"], 1)
+        self.assertEqual([row["dimension_key"] for row in models], ["claude-sonnet-4-6"])
 
 
 class SkillBreakdownTests(unittest.TestCase):
