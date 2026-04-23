@@ -97,14 +97,18 @@ export function providerTabs(activeKey) {
 export function dataSourcePanel(status, opts = {}) {
   const sources = Array.isArray(status?.sources) ? status.sources : [];
   if (!sources.length) return '';
-  const missing = sources.filter(s => s.status !== 'connected' && s.status !== 'disabled');
-  const waiting = sources.filter(s => s.connected && (s.cached_sessions || 0) === 0);
-  const title = missing.length || waiting.length ? 'Connect data sources' : 'Data sources';
-  const body = missing.length
-    ? 'Some local histories are not available yet. Connected sources will keep scanning automatically while the dashboard is open.'
-    : waiting.length
-      ? 'Local logs were found. The next scan will populate the dashboard cache.'
-      : 'Configured local histories are available for scanning.';
+  const partial = sources.filter(s => !['ready', 'disabled'].includes(s.data_state || ''));
+  const cachedOnly = sources.filter(s => ['cached_missing', 'cached_disabled', 'cached_no_logs'].includes(s.data_state || ''));
+  const waiting = sources.filter(s => ['not_scanned', 'scanned_empty'].includes(s.data_state || ''));
+  const title = partial.length || cachedOnly.length || waiting.length ? 'Data coverage' : 'Data sources';
+  let body = 'Enabled source folders have logs and cached sessions. Totals still reflect only supported local logs.';
+  if (cachedOnly.length) {
+    body = 'Some sources are unavailable now, so totals may include cached data from earlier scans and miss newer local history.';
+  } else if (partial.length) {
+    body = 'Some enabled sources are missing, empty, or not cached yet. Dashboard totals are partial until those sources scan successfully.';
+  } else if (sources.some(s => s.status === 'disabled')) {
+    body = 'Only enabled local sources are scanned. Disabled providers are excluded unless their older cached rows are still in the database.';
+  }
   const compactClass = opts.compact ? ' source-panel-compact' : '';
   return `
     <div class="card source-panel${compactClass}">
@@ -123,6 +127,13 @@ export function dataSourcePanel(status, opts = {}) {
 
 function sourceCard(s) {
   const statusLabel = {
+    ready: 'Ready',
+    not_scanned: 'Not cached',
+    scanned_empty: 'No cached data',
+    cached_missing: 'Cached only',
+    cached_disabled: 'Cached only',
+    cached_no_logs: 'Cached only',
+  }[s.data_state] || {
     connected: 'Connected',
     empty: 'No logs yet',
     missing: 'Missing',
@@ -130,7 +141,7 @@ function sourceCard(s) {
   }[s.status] || fmt.providerLabel(s.status);
   const detail = sourceDetail(s);
   return `
-    <div class="source-card source-${fmt.htmlSafe(s.status || 'unknown')}">
+    <div class="source-card source-${fmt.htmlSafe(s.status || 'unknown')} source-state-${fmt.htmlSafe(s.data_state || 'unknown')}">
       <div class="source-title">
         <span>${fmt.htmlSafe(s.label || fmt.providerLabel(s.provider))}</span>
         <span class="badge ${fmt.providerClass(s.provider)}">${fmt.htmlSafe(statusLabel)}</span>
@@ -141,12 +152,19 @@ function sourceCard(s) {
 }
 
 function sourceDetail(s) {
+  const sessions = fmt.int(s.cached_sessions) + ' cached session' + (s.cached_sessions === 1 ? '' : 's');
+  const messages = fmt.int(s.cached_messages) + ' cached message' + (s.cached_messages === 1 ? '' : 's');
+  const logs = fmt.int(s.log_files) + ' log file' + (s.log_files === 1 ? '' : 's');
+  const scanned = fmt.int(s.scanned_files) + ' scanned file' + (s.scanned_files === 1 ? '' : 's');
+  if (s.data_state === 'cached_disabled') return `${sessions}; scanning disabled for this run.`;
+  if (s.data_state === 'cached_missing') return `${sessions}; source path is missing, so this may be stale.`;
+  if (s.data_state === 'cached_no_logs') return `${sessions}; source folder has no logs now.`;
   if (s.status === 'disabled') return fmt.htmlSafe(s.hint || 'Disabled for this run.');
   if (s.status === 'missing') return fmt.htmlSafe(s.hint || 'Folder not found.');
-  if (s.status === 'empty') return 'Folder found, but no JSONL logs were found yet.';
-  const logs = fmt.int(s.log_files) + ' log file' + (s.log_files === 1 ? '' : 's');
-  const sessions = fmt.int(s.cached_sessions) + ' cached session' + (s.cached_sessions === 1 ? '' : 's');
-  return `${logs} · ${sessions}`;
+  if (s.status === 'empty') return 'Folder found, but no supported session logs were found yet.';
+  if (s.data_state === 'not_scanned') return `${logs}; not cached yet. Use Scan now.`;
+  if (s.data_state === 'scanned_empty') return `${logs} · ${scanned}; no supported sessions cached yet.`;
+  return `${logs} · ${scanned} · ${sessions} · ${messages}`;
 }
 
 export function withQuery(url, params = {}) {
@@ -217,7 +235,7 @@ async function firstRun() {
   overlay.innerHTML = `
     <div class="modal">
       <h2>Welcome — pick your plan</h2>
-      <p>This sets how costs are displayed. Change it later in Settings.</p>
+      <p>This labels API-equivalent token estimates with your subscription context. Change it later in Settings.</p>
       <select id="firstplan" style="width:100%">
         ${plans.map(([k,v]) => `<option value="${k}">${v.label}${v.monthly ? ` — $${v.monthly}/mo` : ''}</option>`).join('')}
       </select>

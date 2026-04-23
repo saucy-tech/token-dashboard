@@ -49,7 +49,7 @@ export default async function (root) {
 
   const subtitle = sort.key === 'recent'
     ? 'Your latest prompts and the assistant turn each one triggered. Click a row to see the full prompt.'
-    : 'The prompts that cost the most tokens. Click a row to see the full prompt.';
+    : 'The prompts that used the most billable tokens. Cache-read cost is shown only when the model has pricing.';
   const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
   const exportParams = {
     limit: 100,
@@ -79,7 +79,7 @@ export default async function (root) {
       </div>
       <table id="prompts">
         <thead><tr>
-          <th>${sort.key === 'recent' ? 'when' : 'cache cost'}</th>
+          <th>${sort.key === 'recent' ? 'when' : 'cache-read cost'}</th>
           <th>prompt</th>
           <th>provider</th>
           <th>model</th>
@@ -90,7 +90,7 @@ export default async function (root) {
         <tbody>
           ${rows.map((r,i) => `
             <tr data-i="${i}" style="cursor:pointer">
-              <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : fmt.usd4(r.estimated_cost_usd)}</td>
+              <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : promptCost(r)}</td>
               <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
               <td><span class="badge ${fmt.providerClass(r.provider)}">${fmt.htmlSafe(fmt.providerLabel(r.provider))}</span></td>
               <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
@@ -124,7 +124,7 @@ export default async function (root) {
           <pre class="blur-sensitive">${fmt.htmlSafe(r.prompt_text || '')}</pre>
           <div class="flex" style="margin-top:12px;flex-wrap:wrap;gap:14px">
             <span class="muted">${fmt.ts(r.timestamp)}</span>
-            <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ~${fmt.usd4(r.estimated_cost_usd)} cache cost</span>
+            <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ${promptCostDetail(r)}</span>
             <span class="spacer"></span>
             <a href="${sessionHref(r.session_id, provider)}">Open session →</a>
           </div>
@@ -132,4 +132,15 @@ export default async function (root) {
       drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
   });
+}
+
+function promptCost(r) {
+  if (r.estimated_cost_usd == null) return '<span class="muted">not priced</span>';
+  return `${r.estimated_cost_estimated ? '~' : ''}${fmt.usd4(r.estimated_cost_usd)}`;
+}
+
+function promptCostDetail(r) {
+  if (r.estimated_cost_usd == null) return 'cache-read cost not priced';
+  const prefix = r.estimated_cost_estimated ? 'tier-estimated ' : '';
+  return `${prefix}${fmt.usd4(r.estimated_cost_usd)} cache-read cost`;
 }

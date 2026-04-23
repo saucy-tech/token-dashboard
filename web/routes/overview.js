@@ -105,9 +105,7 @@ export default async function (root) {
       </div>`;
   }).join('');
 
-  const costSub = totals.cost_partial
-    ? `<div class="sub">${totals.unpriced_models || 0} model${(totals.unpriced_models || 0) === 1 ? '' : 's'} unpriced</div>`
-    : planSubtitle();
+  const costSub = costSubtitle(totals);
 
   const rangeTabs = `
     <div class="range-tabs" role="tablist">
@@ -139,7 +137,7 @@ export default async function (root) {
       ${kpi('Cache read',   fmt.compact(totals.cache_read_tokens),  fmt.int(totals.cache_read_tokens) + ' tokens')}
       ${kpi('Cache create', fmt.compact(cacheCreate),               fmt.int(cacheCreate) + ' tokens')}
       <div class="card kpi cost">
-        <div class="label">Est. cost</div>
+        <div class="label">API-equiv. cost</div>
         <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
         ${costSub}
       </div>
@@ -155,6 +153,7 @@ export default async function (root) {
         <dt>Cache read</dt><dd>Tokens re-used from cached context. High cache-read counts usually mean better context re-use and lower marginal cost.</dd>
         <dt>Cache create</dt><dd>Writing something into the cache for the first time. One-time cost; pays off on the next turn.</dd>
         <dt>Billable tokens</dt><dd>Input + Output + Cache create. Cache reads are billed separately (and much cheaper).</dd>
+        <dt>API-equivalent cost</dt><dd>Estimated from token rates in <code>pricing.json</code>. Subscription plans are shown as context, not added to this number.</dd>
       </dl>
     </details>
 
@@ -264,9 +263,29 @@ export default async function (root) {
   });
 }
 
+function costSubtitle(totals) {
+  const notes = [];
+  if (totals.cost_usd == null) {
+    notes.push((totals.sessions || 0) ? 'missing pricing for all models' : 'no model usage in range');
+  } else {
+    notes.push('token-rate estimate');
+  }
+  if (totals.cost_partial) {
+    const n = totals.unpriced_models || 0;
+    notes.push(`partial: ${n} unpriced model${n === 1 ? '' : 's'}`);
+  }
+  if (totals.cost_estimated) {
+    const n = totals.estimated_models || 0;
+    notes.push(`tier-estimated: ${n} model${n === 1 ? '' : 's'}`);
+  }
+  const plan = planSubtitle();
+  if (plan) notes.push(plan);
+  return `<div class="sub">${notes.map(fmt.htmlSafe).join(' · ')}</div>`;
+}
+
 function planSubtitle() {
-  if (!state.pricing || state.plan === 'api') return '';
+  if (!state.pricing || state.plan === 'api') return null;
   const p = state.pricing.plans[state.plan];
-  if (!p || !p.monthly) return '';
-  return `<div class="sub">pay $${p.monthly}/mo on ${fmt.htmlSafe(p.label)}</div>`;
+  if (!p || !p.monthly) return null;
+  return `${p.label}: $${p.monthly}/mo subscription not included`;
 }

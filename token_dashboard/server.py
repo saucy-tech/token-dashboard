@@ -140,16 +140,21 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 cost_usd = 0.0
                 priced = 0
                 unpriced = 0
+                estimated = 0
                 for m in model_breakdown(db_path, since, until, provider=provider):
                     c = cost_for(m["model"], m, pricing)
                     if c["usd"] is not None:
                         cost_usd += c["usd"]
                         priced += 1
+                        if c["estimated"]:
+                            estimated += 1
                     else:
                         unpriced += 1
                 totals["cost_usd"] = round(cost_usd, 4) if priced else None
                 totals["cost_partial"] = unpriced > 0
+                totals["cost_estimated"] = estimated > 0
                 totals["unpriced_models"] = unpriced
+                totals["estimated_models"] = estimated
                 return _send_json(self, totals)
             if path.startswith("/api/export/"):
                 target = path[len("/api/export/"):]
@@ -167,6 +172,8 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                             "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
                         }, pricing)
                         r["estimated_cost_usd"] = c["usd"]
+                        r["estimated_cost_partial"] = c["usd"] is None
+                        r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
                     return _export_rows(self, rows, "prompts", fmt)
                 if name == "projects":
                     return _export_rows(
@@ -200,6 +207,8 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                         "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
                     }, pricing)
                     r["estimated_cost_usd"] = c["usd"]
+                    r["estimated_cost_partial"] = c["usd"] is None
+                    r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
                 return _send_json(self, rows)
             if path == "/api/projects":
                 return _send_json(self, project_summary(db_path, since, until, provider=provider))

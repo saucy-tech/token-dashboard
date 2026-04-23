@@ -1,11 +1,58 @@
 """Rule-based tips engine — produces actionable suggestions from SQLite."""
 from __future__ import annotations
 
+import re
 import time
-from datetime import datetime, timedelta
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
 
 from .db import connect
+
+
+CORRECTION_RE = re.compile(
+    r"^\s*(no|wrong|wait|actually|not quite|that's not|thats not|you missed|i said|i asked|stop)\b",
+    re.IGNORECASE,
+)
+KEEP_GOING_RE = re.compile(r"^\s*(keep going|continue|go on|finish|proceed)\s*[.!?]*\s*$", re.IGNORECASE)
+WORD_RE = re.compile(r"\w+")
+
+READ_TOOL_SQL = """
+(
+  LOWER(tool_name) LIKE '%read%'
+  OR LOWER(tool_name) LIKE '%grep%'
+  OR LOWER(tool_name) LIKE '%glob%'
+  OR LOWER(tool_name) = 'ls'
+  OR (
+    LOWER(tool_name) = 'exec_command'
+    AND (
+      LOWER(TRIM(COALESCE(target, ''))) = 'ls'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'ls %'
+      OR LOWER(TRIM(COALESCE(target, ''))) = 'rg'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'rg %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'sed %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'cat %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'find %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'nl %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'wc %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'head %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'tail %'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'pwd%'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'git status%'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'git diff%'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'git show%'
+      OR LOWER(TRIM(COALESCE(target, ''))) LIKE 'git log%'
+    )
+  )
+)
+"""
+
+EDIT_TOOL_SQL = """
+(
+  LOWER(tool_name) LIKE '%edit%'
+  OR LOWER(tool_name) LIKE '%write%'
+  OR LOWER(tool_name) = 'apply_patch'
+)
+"""
 
 
 def _iso_days_ago(today_iso: str, n: int) -> str:
@@ -15,6 +62,37 @@ def _iso_days_ago(today_iso: str, n: int) -> str:
 
 def _key(category: str, scope: str) -> str:
     return f"{category}:{scope}"
+
+
+def _provider_label(provider: Optional[str]) -> str:
+    value = (provider or "").strip().lower()
+    if not value:
+        return "Agent"
+    return value[0].upper() + value[1:]
+
+
+def _parse_ts(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _word_set(text: str) -> set:
+    return {m.group(0).lower() for m in WORD_RE.finditer(text or "")}
+
+
+def _jaccard(a: str, b: str) -> float:
+    sa = _word_set(a)
+    sb = _word_set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 def _is_dismissed(db_path, key: str) -> bool:
@@ -177,10 +255,380 @@ def outlier_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     return out
 
 
+def doctor_edit_thrashing_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-style signal: one file edited repeatedly in a session."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    out = []
+    with connect(db_path) as c:
+        for row in c.execute(f"""
+          SELECT session_id, project_slug, provider, target, COUNT(*) AS edits
+            FROM tool_calls
+           WHERE timestamp >= ?
+             AND target IS NOT NULL
+             AND {EDIT_TOOL_SQL}
+           GROUP BY session_id, project_slug, provider, target
+          HAVING edits >= 5
+           ORDER BY edits DESC
+           LIMIT 10
+        """, (since,)):
+            provider = row["provider"] or "claude"
+            label = _provider_label(provider)
+            key = _key("doctor-edit-thrashing", f"{provider}:{row['session_id']}:{row['target']}")
+            if _is_dismissed(db_path, key):
+                continue
+            out.append({
+                "key": key,
+                "category": "doctor",
+                "provider": provider,
+                "title": f"{label}: {row['target']} edited {row['edits']} times in one session",
+                "body": f"Doctor-style analysis flags 5+ edits to the same file as edit thrashing. In {row['project_slug']}, this session likely needed a fuller read and one complete edit plan before touching the file again.",
+                "scope": row["session_id"],
+                "rule": "Read the full file before editing. Plan all changes, then make one complete edit.",
+                "signal": "edit-thrashing",
+                "severity": "high" if (row["edits"] or 0) >= 10 else "medium",
+            })
+    return out
+
+
+def doctor_error_loop_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-style signal: 3+ consecutive tool errors in a session."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    out = []
+    seen = set()
+    with connect(db_path) as c:
+        rows = c.execute("""
+          SELECT session_id, project_slug, provider, tool_name, target, is_error, timestamp, id
+            FROM tool_calls
+           WHERE timestamp >= ?
+           ORDER BY session_id, timestamp, id
+        """, (since,)).fetchall()
+
+    current_session = None
+    failures: List[dict] = []
+
+    def flush_failures() -> None:
+        if len(failures) < 3:
+            return
+        first = failures[0]
+        provider = first["provider"] or "claude"
+        label = _provider_label(provider)
+        scope = f"{provider}:{first['session_id']}:{first['timestamp']}:{first['tool_name']}"
+        key = _key("doctor-error-loop", scope)
+        if key in seen or _is_dismissed(db_path, key):
+            return
+        seen.add(key)
+        tool = first["tool_name"] or "tool"
+        out.append({
+            "key": key,
+            "category": "doctor",
+            "provider": provider,
+            "title": f"{label}: {len(failures)} consecutive {tool} failures",
+            "body": f"Doctor-style analysis treats 3+ consecutive tool failures as an error loop. In {first['project_slug']}, the agent kept retrying without enough strategy change.",
+            "scope": first["session_id"],
+            "rule": "After 2 consecutive tool failures, stop and change approach entirely before retrying.",
+            "signal": "error-loop",
+            "severity": "critical" if len(failures) >= 5 else "high",
+        })
+
+    for row in rows:
+        if row["session_id"] != current_session:
+            flush_failures()
+            current_session = row["session_id"]
+            failures = []
+        if row["is_error"]:
+            failures.append(dict(row))
+        else:
+            flush_failures()
+            failures = []
+    flush_failures()
+    return out[:10]
+
+
+def doctor_exploration_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-style signal: high read-to-edit ratio or read-only wandering."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    out = []
+    with connect(db_path) as c:
+        rows = c.execute(f"""
+          SELECT session_id, project_slug, provider,
+                 SUM(CASE WHEN {READ_TOOL_SQL} THEN 1 ELSE 0 END) AS reads,
+                 SUM(CASE WHEN {EDIT_TOOL_SQL} THEN 1 ELSE 0 END) AS edits
+            FROM tool_calls
+           WHERE timestamp >= ?
+           GROUP BY session_id, project_slug, provider
+          HAVING reads > 0
+           ORDER BY reads DESC
+           LIMIT 100
+        """, (since,)).fetchall()
+    for row in rows:
+        reads = row["reads"] or 0
+        edits = row["edits"] or 0
+        provider = row["provider"] or "claude"
+        label_prefix = f"{_provider_label(provider)}: "
+        if edits > 0:
+            ratio = reads / edits
+            if ratio < 10:
+                continue
+            label = f"read-to-edit ratio was {ratio:.1f}:1"
+            body = f"This session in {row['project_slug']} made {reads} read/search calls before or around {edits} edits. Doctor-style analysis flags 10:1 or higher as excessive exploration."
+            rule = "Act sooner: read enough to understand the change, make the edit, then iterate from verification."
+            signal = "excessive-exploration"
+        elif reads > 20:
+            label = f"{reads} read/search calls with no edits"
+            body = f"This session in {row['project_slug']} explored heavily without editing. Doctor-style analysis treats long read-only sessions as a sign the agent may be stuck or unclear on the next action."
+            rule = "When exploration is not converging, summarize what is known and choose the smallest useful next action."
+            signal = "read-only-session"
+        else:
+            continue
+        key = _key(f"doctor-{signal}", f"{provider}:{row['session_id']}")
+        if _is_dismissed(db_path, key):
+            continue
+        out.append({
+            "key": key,
+            "category": "doctor",
+            "provider": provider,
+            "title": f"{label_prefix}Session {label}",
+            "body": body,
+            "scope": row["session_id"],
+            "rule": rule,
+            "signal": signal,
+            "severity": "high" if (edits and reads / edits >= 20) or reads >= 40 else "medium",
+        })
+    return out[:10]
+
+
+def doctor_abandonment_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-style signal: many short sessions for a project."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    out = []
+    with connect(db_path) as c:
+        rows = c.execute("""
+          SELECT project_slug, provider,
+                 COUNT(*) AS sessions,
+                 SUM(CASE WHEN user_turns < 3 THEN 1 ELSE 0 END) AS short_sessions
+            FROM (
+              SELECT project_slug, provider, session_id,
+                     SUM(CASE WHEN type='user' AND prompt_text IS NOT NULL THEN 1 ELSE 0 END) AS user_turns
+                FROM messages
+               WHERE timestamp >= ?
+               GROUP BY project_slug, provider, session_id
+            )
+           GROUP BY project_slug, provider
+          HAVING sessions >= 3 AND short_sessions >= 3
+           ORDER BY short_sessions DESC
+           LIMIT 10
+        """, (since,)).fetchall()
+    for row in rows:
+        sessions = row["sessions"] or 0
+        short_sessions = row["short_sessions"] or 0
+        ratio = short_sessions / sessions if sessions else 0
+        if ratio < 0.30:
+            continue
+        provider = row["provider"] or "claude"
+        label = _provider_label(provider)
+        key = _key("doctor-high-abandonment-rate", f"{provider}:{row['project_slug']}")
+        if _is_dismissed(db_path, key):
+            continue
+        out.append({
+            "key": key,
+            "category": "doctor",
+            "provider": provider,
+            "title": f"{label}: {short_sessions}/{sessions} sessions in {row['project_slug']} ended quickly",
+            "body": f"Doctor-style analysis flags projects where many sessions have fewer than 3 user turns. That pattern often means restarts, false starts, or abandoned attempts.",
+            "scope": row["project_slug"],
+            "rule": "When a session starts wobbling, summarize what happened and continue deliberately instead of restarting.",
+            "signal": "high-abandonment-rate",
+            "severity": "critical" if ratio >= 0.50 else "high",
+        })
+    return out
+
+
+def _session_message_groups(db_path, since: str) -> Tuple[Dict[str, List[dict]], Dict[str, int]]:
+    user_messages: Dict[str, List[dict]] = {}
+    assistant_counts: Dict[str, int] = {}
+    with connect(db_path) as c:
+        rows = c.execute("""
+          SELECT session_id, project_slug, provider, type, timestamp, prompt_text
+            FROM messages
+           WHERE timestamp >= ? AND type IN ('user', 'assistant')
+           ORDER BY session_id, timestamp
+        """, (since,)).fetchall()
+    for row in rows:
+        sid = row["session_id"]
+        if row["type"] == "assistant":
+            assistant_counts[sid] = assistant_counts.get(sid, 0) + 1
+        elif row["prompt_text"]:
+            user_messages.setdefault(sid, []).append(dict(row))
+    return user_messages, assistant_counts
+
+
+def doctor_behavior_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-style user-behavior signals derived from prompt text."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    user_messages, assistant_counts = _session_message_groups(db_path, since)
+    out = []
+    for session_id, rows in user_messages.items():
+        if not rows:
+            continue
+        project = rows[0]["project_slug"]
+        provider = rows[0].get("provider") or "claude"
+        label = _provider_label(provider)
+        texts = [r["prompt_text"] or "" for r in rows]
+        correction_count = sum(1 for text in texts if CORRECTION_RE.search(text))
+        correction_rate = correction_count / len(texts)
+        if correction_count >= 2 and correction_rate > 0.20:
+            key = _key("doctor-correction-heavy", f"{provider}:{session_id}")
+            if not _is_dismissed(db_path, key):
+                out.append({
+                    "key": key,
+                    "category": "doctor",
+                    "provider": provider,
+                    "title": f"{label}: {correction_count}/{len(texts)} user turns were corrections",
+                    "body": f"In {project}, the user repeatedly corrected or redirected the agent. Doctor-style analysis treats this as a sign the agent should slow down and re-read the ask.",
+                    "scope": session_id,
+                    "rule": "When the user corrects you, stop and re-read their message before continuing.",
+                    "signal": "correction-heavy",
+                    "severity": "critical" if correction_rate > 0.40 else "high",
+                })
+
+        keep_going_count = sum(1 for text in texts if KEEP_GOING_RE.search(text))
+        if keep_going_count >= 2:
+            key = _key("doctor-keep-going-loop", f"{provider}:{session_id}")
+            if not _is_dismissed(db_path, key):
+                out.append({
+                    "key": key,
+                    "category": "doctor",
+                    "provider": provider,
+                    "title": f"{label}: User said keep going {keep_going_count} times",
+                    "body": f"In {project}, repeated continuation prompts suggest the agent may have stopped before the task was actually complete.",
+                    "scope": session_id,
+                    "rule": "Complete the full task before stopping, including verification when it matters.",
+                    "signal": "keep-going-loop",
+                    "severity": "high" if keep_going_count >= 4 else "medium",
+                })
+
+        repetitions = 0
+        for i, text in enumerate(texts):
+            for other in texts[i + 1:i + 5]:
+                if _jaccard(text, other) >= 0.60:
+                    repetitions += 1
+        if repetitions >= 2:
+            key = _key("doctor-repeated-instructions", f"{provider}:{session_id}")
+            if not _is_dismissed(db_path, key):
+                out.append({
+                    "key": key,
+                    "category": "doctor",
+                    "provider": provider,
+                    "title": f"{label}: User repeated similar instructions {repetitions} times",
+                    "body": f"In {project}, repeated instructions usually mean the agent missed or only partially followed the request.",
+                    "scope": session_id,
+                    "rule": "Re-read the user's latest message and make sure every instruction is carried through.",
+                    "signal": "repeated-instructions",
+                    "severity": "critical" if repetitions >= 4 else "high",
+                })
+
+        assistant_turns = assistant_counts.get(session_id, 0)
+        if assistant_turns and len(texts) >= 5:
+            ratio = len(texts) / assistant_turns
+            if ratio > 1.5:
+                key = _key("doctor-high-turn-ratio", f"{provider}:{session_id}")
+                if not _is_dismissed(db_path, key):
+                    out.append({
+                        "key": key,
+                        "category": "doctor",
+                        "provider": provider,
+                        "title": f"{label}: User-to-assistant turn ratio was {ratio:.1f}:1",
+                        "body": f"In {project}, the user had to send unusually many messages per assistant turn, which often indicates repeated steering or correction.",
+                        "scope": session_id,
+                        "rule": "Work more autonomously once the goal is clear, and verify before handing back.",
+                        "signal": "high-turn-ratio",
+                        "severity": "high" if ratio > 2.5 else "medium",
+                    })
+    return out[:10]
+
+
+def doctor_rapid_followup_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-style signal: fast user follow-ups after assistant turns."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    out = []
+    with connect(db_path) as c:
+        rows = c.execute("""
+          SELECT session_id, project_slug, provider, type, timestamp, prompt_text
+            FROM messages
+           WHERE timestamp >= ? AND type IN ('user', 'assistant')
+           ORDER BY session_id, timestamp
+        """, (since,)).fetchall()
+    current_session = None
+    previous = None
+    fast_counts: Dict[str, dict] = {}
+    for row in rows:
+        row = dict(row)
+        if row["session_id"] != current_session:
+            current_session = row["session_id"]
+            previous = None
+        if (
+            previous
+            and previous["type"] == "assistant"
+            and row["type"] == "user"
+            and row.get("prompt_text")
+        ):
+            prev_ts = _parse_ts(previous["timestamp"])
+            cur_ts = _parse_ts(row["timestamp"])
+            if prev_ts and cur_ts:
+                delta = (cur_ts - prev_ts).total_seconds()
+                if 0 < delta < 10:
+                    info = fast_counts.setdefault(row["session_id"], {
+                        "count": 0,
+                        "project_slug": row["project_slug"],
+                        "provider": row.get("provider") or "claude",
+                    })
+                    info["count"] += 1
+        previous = row
+    for session_id, info in fast_counts.items():
+        if info["count"] < 3:
+            continue
+        provider = info.get("provider") or "claude"
+        label = _provider_label(provider)
+        key = _key("doctor-rapid-corrections", f"{provider}:{session_id}")
+        if _is_dismissed(db_path, key):
+            continue
+        out.append({
+            "key": key,
+            "category": "doctor",
+            "provider": provider,
+            "title": f"{label}: {info['count']} rapid user follow-ups after assistant replies",
+            "body": f"In {info['project_slug']}, the user responded within 10 seconds several times. Doctor-style analysis treats that as a hint the answer was immediately incomplete or off-target.",
+            "scope": session_id,
+            "rule": "Double-check the output against the request before presenting it.",
+            "signal": "rapid-corrections",
+            "severity": "high" if info["count"] >= 5 else "medium",
+        })
+    return out[:10]
+
+
+def doctor_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Doctor-inspired quality tips over the same 7-day window."""
+    return [
+        *doctor_edit_thrashing_tips(db_path, today_iso),
+        *doctor_error_loop_tips(db_path, today_iso),
+        *doctor_exploration_tips(db_path, today_iso),
+        *doctor_abandonment_tips(db_path, today_iso),
+        *doctor_behavior_tips(db_path, today_iso),
+        *doctor_rapid_followup_tips(db_path, today_iso),
+    ]
+
+
 def all_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     return [
         *cache_discipline_tips(db_path, today_iso),
         *repeated_target_tips(db_path, today_iso),
         *right_size_tips(db_path, today_iso),
         *outlier_tips(db_path, today_iso),
+        *doctor_tips(db_path, today_iso),
     ]

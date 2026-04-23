@@ -12,11 +12,14 @@ export default async function (root) {
         <div class="tip">
           <div class="tip-head">
             <span class="badge">${fmt.htmlSafe(t.category)}</span>
+            ${t.provider ? `<span class="badge ${fmt.providerClass(t.provider)}">${fmt.htmlSafe(fmt.providerLabel(t.provider))}</span>` : ''}
+            ${t.signal ? `<span class="badge subtle">${fmt.htmlSafe(t.signal)}</span>` : ''}
             <strong>${fmt.htmlSafe(t.title)}</strong>
             <span class="spacer"></span>
             <button class="ghost" data-key="${fmt.htmlSafe(t.key)}">dismiss</button>
           </div>
           <p class="tip-body">${fmt.htmlSafe(t.body)}</p>
+          ${t.rule ? `<div class="tip-rule"><span>Rule</span>${fmt.htmlSafe(t.rule)}</div>` : ''}
         </div>`).join('')}
     </div>`;
   root.querySelectorAll('button[data-key]').forEach(b => {

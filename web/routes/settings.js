@@ -12,7 +12,7 @@ export default async function (root) {
     <div class="card">
       <h2>Settings</h2>
       <h3 style="margin-top:16px">Plan</h3>
-      <p class="muted" style="margin:0 0 12px">Sets how cost is displayed. API mode shows pay-per-token rates. Subscription modes show what you actually pay each month.</p>
+      <p class="muted" style="margin:0 0 12px">Sets the subscription context shown beside API-equivalent token estimates. The dashboard does not convert Pro or Max usage into a true monthly bill.</p>
       <div class="flex">
         <select id="plan">
           ${plans.map(([k,v]) => `<option value="${k}" ${k===cur.plan?'selected':''}>${v.label}${v.monthly?` — $${v.monthly}/mo`:''}</option>`).join('')}
@@ -24,7 +24,7 @@ export default async function (root) {
       <hr class="divider">
 
       <h3>Pricing table</h3>
-      <p class="muted" style="margin:0 0 12px">Edit <code>pricing.json</code> in the project root to change rates. Reload the page after editing.</p>
+      <p class="muted" style="margin:0 0 12px">Rates are used for API-equivalent estimates only. Edit <code>pricing.json</code> in the project root to change rates, then reload.</p>
       <table>
         <thead><tr><th>model</th><th class="num">input</th><th class="num">output</th><th class="num">cache read</th><th class="num">cache 5m</th><th class="num">cache 1h</th></tr></thead>
         <tbody>
@@ -39,6 +39,17 @@ export default async function (root) {
         </tbody>
       </table>
       <p class="muted" style="margin-top:8px;font-size:11px">Rates per 1M tokens, USD.</p>
+
+      <hr class="divider">
+
+      <h3>Known limitations</h3>
+      <ul class="muted limitation-list">
+        <li>Costs are token-rate estimates. Subscription plans are flat monthly prices and are not allocated per turn.</li>
+        <li>Unknown model IDs are omitted from cost totals unless their name matches a known Claude tier fallback.</li>
+        <li>Totals include only supported local Claude Code and Codex logs that have been scanned into the SQLite cache.</li>
+        <li>Warp and server-side Cowork sessions are not included because they do not have a confirmed local usage source here.</li>
+        <li>Skill token counts are partial; the Skills tab can count invocations more reliably than loaded skill text.</li>
+      </ul>
 
       <hr class="divider">
 

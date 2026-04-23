@@ -286,10 +286,13 @@ def data_source_status(
     ]
     enabled = [s for s in sources if s["status"] != "disabled"]
     missing = [s for s in enabled if not s["connected"]]
+    incomplete = [s for s in sources if s["data_state"] not in ("ready", "disabled")]
     return {
         "sources": sources,
         "all_connected": bool(enabled) and not missing,
+        "data_complete": bool(enabled) and not incomplete,
         "missing": [s["provider"] for s in missing],
+        "incomplete": [s["provider"] for s in incomplete],
     }
 
 
@@ -357,13 +360,17 @@ def _source_row(
     hint: str,
 ) -> dict:
     cache = _provider_cache_counts(db_path, provider)
+    scanned_files = _scanned_file_count(db_path, path)
+    data_state = _source_data_state(status, log_files, scanned_files, cache)
     return {
         "provider": provider,
         "label": label,
         "path": str(path) if path else None,
         "status": status,
+        "data_state": data_state,
         "connected": status == "connected",
         "log_files": log_files,
+        "scanned_files": scanned_files,
         "cached_sessions": cache["sessions"],
         "cached_messages": cache["messages"],
         "hint": hint,
@@ -400,6 +407,39 @@ def _provider_cache_counts(db_path: Optional[Union[str, Path]], provider: str) -
     except Exception:
         return {"sessions": 0, "messages": 0}
     return {"sessions": int(row["sessions"] or 0), "messages": int(row["messages"] or 0)}
+
+
+def _scanned_file_count(
+    db_path: Optional[Union[str, Path]],
+    root: Optional[Path],
+) -> int:
+    if not db_path or not root:
+        return 0
+    try:
+        prefix = str(root.expanduser())
+        with connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS files FROM files WHERE path = ? OR path LIKE ?",
+                (prefix, prefix.rstrip("/") + "/%"),
+            ).fetchone()
+    except Exception:
+        return 0
+    return int(row["files"] or 0)
+
+
+def _source_data_state(status: str, log_files: int, scanned_files: int, cache: dict) -> str:
+    has_cache = (cache["sessions"] or 0) > 0 or (cache["messages"] or 0) > 0
+    if status == "disabled":
+        return "cached_disabled" if has_cache else "disabled"
+    if status == "missing":
+        return "cached_missing" if has_cache else "missing"
+    if status == "empty":
+        return "cached_no_logs" if has_cache else "empty"
+    if log_files > 0 and scanned_files <= 0:
+        return "not_scanned"
+    if has_cache:
+        return "ready"
+    return "scanned_empty"
 
 
 def _result_token_estimate(body) -> int:
