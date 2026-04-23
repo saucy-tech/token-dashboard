@@ -1,8 +1,8 @@
-import { api, dataSourcePanel, state, $ } from '/web/app.js';
+import { api, dataSourcePanel, optionalApi, state, $ } from '/web/app.js';
 
 export default async function (root) {
   const cur = await api('/api/plan');
-  const sources = await api('/api/sources');
+  const sources = await optionalApi('/api/sources', { sources: [] });
   const plans = Object.entries(cur.pricing.plans);
   root.innerHTML = `
     <div style="margin-bottom:16px">

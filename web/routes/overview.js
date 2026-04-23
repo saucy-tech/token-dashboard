@@ -2,6 +2,7 @@ import {
   api,
   dataSourcePanel,
   fmt,
+  optionalApi,
   providerTabs,
   readHashParam,
   readProvider,
@@ -69,7 +70,7 @@ export default async function (root) {
     api(withQuery('/api/daily', params)),
     api(withQuery('/api/by-model', params)),
     api(withQuery('/api/providers', params)),
-    api('/api/sources'),
+    optionalApi('/api/sources', { sources: [] }),
   ]);
 
   const cacheCreate =

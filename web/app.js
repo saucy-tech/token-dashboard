@@ -45,6 +45,13 @@ export async function api(path, opts) {
   return r.json();
 }
 
+export async function optionalApi(path, fallback, opts) {
+  const r = await fetch(path, opts);
+  if (r.status === 404) return fallback;
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
 export const state = { plan: 'api', pricing: null };
 export const PROVIDER_OPTIONS = [
   { key: 'all', label: 'All providers' },
