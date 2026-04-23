@@ -68,7 +68,7 @@ python3 cli.py dashboard --projects-dir /path/to/claude-projects --codex-dir /pa
 | `CODEX_HOME` | `~/.codex` | Where to scan for active and archived Codex session files |
 | `TOKEN_DASHBOARD_DB` | `~/.claude/token-dashboard.db` | SQLite cache location |
 
-Pricing lives in [`pricing.json`](pricing.json). Claude pricing is bundled today. Codex pricing is not yet bundled, so mixed-provider cost views can be partial until those rates are added.
+Pricing lives in [`pricing.json`](pricing.json). Claude and common Codex/OpenAI model pricing are bundled today. Mixed-provider cost views can still be partial when transcripts reference model IDs that are not in the table yet.
 
 ## CLI reference
 

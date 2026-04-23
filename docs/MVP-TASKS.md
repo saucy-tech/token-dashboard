@@ -18,7 +18,7 @@ This is the working execution list for the Agent Dashboard MVP. The goal is to k
 
 ## Next
 
-- [ ] Fill in Codex pricing mappings so estimated cost is less partial.
+- [x] Fill in Codex pricing mappings so estimated cost is less partial.
 - [ ] Add session drill-down improvements such as copied prompt text and tool-call detail.
 - [ ] Add a lightweight onboarding state that detects missing local data sources and explains what is connected.
 

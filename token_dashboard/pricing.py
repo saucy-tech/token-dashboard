@@ -31,8 +31,12 @@ def cost_for(model: str, usage: dict, pricing: dict) -> dict:
             estimated = True
         else:
             return {"usd": None, "estimated": True, "breakdown": {}}
+    input_tokens = usage["input_tokens"]
+    if rates.get("cache_read_includes_input"):
+        input_tokens = max(input_tokens - usage["cache_read_tokens"], 0)
+
     bd = {
-        "input":           usage["input_tokens"]            * rates["input"]           / 1_000_000,
+        "input":           input_tokens                      * rates["input"]           / 1_000_000,
         "output":          usage["output_tokens"]           * rates["output"]          / 1_000_000,
         "cache_read":      usage["cache_read_tokens"]       * rates["cache_read"]      / 1_000_000,
         "cache_create_5m": usage["cache_create_5m_tokens"]  * rates["cache_create_5m"] / 1_000_000,

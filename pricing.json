@@ -1,9 +1,17 @@
 {
   "models": {
-    "claude-opus-4-7":     { "tier": "opus",   "input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
-    "claude-opus-4-6":     { "tier": "opus",   "input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
-    "claude-sonnet-4-6":   { "tier": "sonnet", "input":  3.00, "output": 15.00, "cache_read": 0.30, "cache_create_5m":  3.75, "cache_create_1h":  6.00 },
-    "claude-haiku-4-5":    { "tier": "haiku",  "input":  1.00, "output":  5.00, "cache_read": 0.10, "cache_create_5m":  1.25, "cache_create_1h":  2.00 }
+    "claude-opus-4-7":     { "tier": "opus",   "input": 15.00, "output": 75.00, "cache_read": 1.50,  "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
+    "claude-opus-4-6":     { "tier": "opus",   "input": 15.00, "output": 75.00, "cache_read": 1.50,  "cache_create_5m": 18.75, "cache_create_1h": 30.00 },
+    "claude-sonnet-4-6":   { "tier": "sonnet", "input":  3.00, "output": 15.00, "cache_read": 0.30,  "cache_create_5m":  3.75, "cache_create_1h":  6.00 },
+    "claude-haiku-4-5":    { "tier": "haiku",  "input":  1.00, "output":  5.00, "cache_read": 0.10,  "cache_create_5m":  1.25, "cache_create_1h":  2.00 },
+    "gpt-5.5":             { "tier": "gpt",    "input":  5.00, "output": 30.00, "cache_read": 0.50,  "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5.4":             { "tier": "gpt",    "input":  2.50, "output": 15.00, "cache_read": 0.25,  "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5.4-mini":        { "tier": "gpt",    "input":  0.75, "output":  4.50, "cache_read": 0.075, "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5.4-nano":        { "tier": "gpt",    "input":  0.20, "output":  1.25, "cache_read": 0.02,  "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5.3-codex":       { "tier": "codex",  "input":  1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5.2-codex":       { "tier": "codex",  "input":  1.75, "output": 14.00, "cache_read": 0.175, "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5.1-codex":       { "tier": "codex",  "input":  1.25, "output": 10.00, "cache_read": 0.125, "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true },
+    "gpt-5-codex":         { "tier": "codex",  "input":  1.25, "output": 10.00, "cache_read": 0.125, "cache_create_5m":  0.00, "cache_create_1h":  0.00, "cache_read_includes_input": true }
   },
   "tier_fallback": {
     "opus":   { "input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_create_5m": 18.75, "cache_create_1h": 30.00 },

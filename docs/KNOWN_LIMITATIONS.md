@@ -18,7 +18,7 @@ If you use Claude's Cowork mode (server-side sessions, not local `claude` CLI), 
 
 ## Non-standard model names get tier-fallback pricing
 
-If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), cost is estimated from the tier substring (`opus` / `sonnet` / `haiku`) in the name. The UI marks these as `estimated: true`. If the model name contains none of those substrings, cost is reported as null.
+If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), Claude cost is estimated from the tier substring (`opus` / `sonnet` / `haiku`) in the name. The UI marks these as `estimated: true`. Unknown Codex/OpenAI model names do not have a tier fallback yet, so their cost is reported as null.
 
 ## First scan can be slow
 

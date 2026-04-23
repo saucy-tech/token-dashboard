@@ -41,6 +41,22 @@ class CostTests(unittest.TestCase):
         c_cr = cost_for("claude-opus-4-7", self._u(cache_read_tokens=1_000_000), self.p)
         self.assertLess(c_cr["usd"], c_in["usd"])
 
+    def test_known_codex_gpt_5_4_cost(self):
+        c = cost_for("gpt-5.4", self._u(input_tokens=1_000_000, output_tokens=1_000_000), self.p)
+        self.assertAlmostEqual(c["usd"], 17.50, places=4)
+        self.assertFalse(c["estimated"])
+
+    def test_codex_cached_input_not_double_counted(self):
+        c = cost_for("gpt-5.4", self._u(input_tokens=1_000_000, cache_read_tokens=250_000), self.p)
+        self.assertAlmostEqual(c["usd"], 1.9375, places=4)
+        self.assertAlmostEqual(c["breakdown"]["input"], 1.875, places=4)
+        self.assertAlmostEqual(c["breakdown"]["cache_read"], 0.0625, places=4)
+
+    def test_specialized_codex_model_cost(self):
+        c = cost_for("gpt-5.3-codex", self._u(output_tokens=1_000_000), self.p)
+        self.assertAlmostEqual(c["usd"], 14.00, places=4)
+        self.assertFalse(c["estimated"])
+
 
 class PlanFormatTests(unittest.TestCase):
     def setUp(self):
