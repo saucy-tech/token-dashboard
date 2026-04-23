@@ -96,6 +96,9 @@ class QueryTests(unittest.TestCase):
     def test_session_turns(self):
         rows = session_turns(self.db, "s1")
         self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tool_calls"], [])
+        self.assertEqual([t["tool_name"] for t in rows[1]["tool_calls"]], ["Read", "Bash"])
+        self.assertEqual(rows[1]["tool_calls"][0]["target"], "foo.py")
 
     def test_daily_token_breakdown_groups_by_day(self):
         rows = daily_token_breakdown(self.db)

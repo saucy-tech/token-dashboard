@@ -1,9 +1,14 @@
-import { api, state, $ } from '/web/app.js';
+import { api, dataSourcePanel, state, $ } from '/web/app.js';
 
 export default async function (root) {
   const cur = await api('/api/plan');
+  const sources = await api('/api/sources');
   const plans = Object.entries(cur.pricing.plans);
   root.innerHTML = `
+    <div style="margin-bottom:16px">
+      ${dataSourcePanel(sources, { scanButton: true })}
+    </div>
+
     <div class="card">
       <h2>Settings</h2>
       <h3 style="margin-top:16px">Plan</h3>
@@ -40,6 +45,12 @@ export default async function (root) {
       <h3>Privacy</h3>
       <p class="muted">Press <code>Cmd/Ctrl + B</code> anywhere to blur prompt text and other sensitive content for screenshots.</p>
     </div>`;
+
+  root.querySelector('[data-scan-now]')?.addEventListener('click', async event => {
+    event.currentTarget.textContent = 'Scanning...';
+    await api('/api/scan');
+    window.dispatchEvent(new Event('hashchange'));
+  });
 
   $('#save').addEventListener('click', async () => {
     const plan = $('#plan').value;

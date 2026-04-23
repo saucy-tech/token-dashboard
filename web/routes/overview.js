@@ -1,5 +1,6 @@
 import {
   api,
+  dataSourcePanel,
   fmt,
   providerTabs,
   readHashParam,
@@ -60,7 +61,7 @@ export default async function (root) {
   const since = sinceIso(range);
   const params = queryParams(since, provider);
 
-  const [totals, projects, sessions, tools, daily, byModel, providers] = await Promise.all([
+  const [totals, projects, sessions, tools, daily, byModel, providers, sources] = await Promise.all([
     api(withQuery('/api/overview', params)),
     api(withQuery('/api/projects', params)),
     api(withQuery('/api/sessions', { ...params, limit: 10 })),
@@ -68,6 +69,7 @@ export default async function (root) {
     api(withQuery('/api/daily', params)),
     api(withQuery('/api/by-model', params)),
     api(withQuery('/api/providers', params)),
+    api('/api/sources'),
   ]);
 
   const cacheCreate =
@@ -122,6 +124,10 @@ export default async function (root) {
 
     <div class="flex" style="margin:-4px 0 16px;justify-content:flex-end">
       ${providerTabs(provider.key)}
+    </div>
+
+    <div style="margin-bottom:16px">
+      ${dataSourcePanel(sources, { scanButton: true })}
     </div>
 
     <div class="row cols-7">
@@ -201,6 +207,11 @@ export default async function (root) {
   root.querySelectorAll('.range-tabs button').forEach(btn => {
     if (btn.dataset.range) btn.addEventListener('click', () => writeRange(btn.dataset.range));
     if (btn.dataset.provider) btn.addEventListener('click', () => writeProvider(btn.dataset.provider));
+  });
+  root.querySelector('[data-scan-now]')?.addEventListener('click', async event => {
+    event.currentTarget.textContent = 'Scanning...';
+    await api('/api/scan');
+    window.dispatchEvent(new Event('hashchange'));
   });
 
   // Your daily work — billable tokens (input + output + cache create)

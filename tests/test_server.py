@@ -105,6 +105,14 @@ class ServerTests(unittest.TestCase):
         providers = {row["provider"] for row in body}
         self.assertEqual(providers, {"claude", "codex"})
 
+    def test_sources_json(self):
+        body = json.loads(self._get("/api/sources"))
+        self.assertIn("sources", body)
+        by_provider = {row["provider"]: row for row in body["sources"]}
+        self.assertEqual(by_provider["claude"]["status"], "missing")
+        self.assertEqual(by_provider["claude"]["cached_sessions"], 1)
+        self.assertEqual(by_provider["codex"]["status"], "disabled")
+
     def test_head_returns_200_not_501(self):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/", method="HEAD")
         with urllib.request.urlopen(req) as resp:

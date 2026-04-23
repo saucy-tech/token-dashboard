@@ -274,6 +274,134 @@ def scan_sources(
     return totals
 
 
+def data_source_status(
+    claude_projects_root: Optional[Union[str, Path]],
+    codex_home: Optional[Union[str, Path]],
+    db_path: Optional[Union[str, Path]] = None,
+) -> dict:
+    """Return read-only source availability for onboarding and settings."""
+    sources = [
+        _claude_source_status(claude_projects_root, db_path),
+        _codex_source_status(codex_home, db_path),
+    ]
+    enabled = [s for s in sources if s["status"] != "disabled"]
+    missing = [s for s in enabled if not s["connected"]]
+    return {
+        "sources": sources,
+        "all_connected": bool(enabled) and not missing,
+        "missing": [s["provider"] for s in missing],
+    }
+
+
+def _claude_source_status(
+    projects_root: Optional[Union[str, Path]],
+    db_path: Optional[Union[str, Path]],
+) -> dict:
+    path = Path(projects_root).expanduser() if projects_root else None
+    files = _count_jsonl_files(path) if path else 0
+    return _source_row(
+        provider="claude",
+        label="Claude Code",
+        path=path,
+        status=_path_status(path, files),
+        log_files=files,
+        db_path=db_path,
+        hint="Run Claude Code once, then scan ~/.claude/projects.",
+    )
+
+
+def _codex_source_status(
+    codex_home: Optional[Union[str, Path]],
+    db_path: Optional[Union[str, Path]],
+) -> dict:
+    if not codex_home:
+        return _source_row(
+            provider="codex",
+            label="Codex",
+            path=None,
+            status="disabled",
+            log_files=0,
+            db_path=db_path,
+            hint="Codex scanning was disabled for this dashboard run.",
+        )
+    path = Path(codex_home).expanduser()
+    files = len(_codex_candidate_paths(path)) if path.is_dir() else 0
+    return _source_row(
+        provider="codex",
+        label="Codex",
+        path=path,
+        status=_path_status(path, files),
+        log_files=files,
+        db_path=db_path,
+        hint="Run Codex once, then scan ~/.codex/sessions and archived_sessions.",
+    )
+
+
+def _path_status(path: Optional[Path], log_files: int) -> str:
+    if path is None:
+        return "disabled"
+    if not path.is_dir():
+        return "missing"
+    if log_files <= 0:
+        return "empty"
+    return "connected"
+
+
+def _source_row(
+    provider: str,
+    label: str,
+    path: Optional[Path],
+    status: str,
+    log_files: int,
+    db_path: Optional[Union[str, Path]],
+    hint: str,
+) -> dict:
+    cache = _provider_cache_counts(db_path, provider)
+    return {
+        "provider": provider,
+        "label": label,
+        "path": str(path) if path else None,
+        "status": status,
+        "connected": status == "connected",
+        "log_files": log_files,
+        "cached_sessions": cache["sessions"],
+        "cached_messages": cache["messages"],
+        "hint": hint,
+    }
+
+
+def _count_jsonl_files(root: Optional[Path]) -> int:
+    if not root or not root.is_dir():
+        return 0
+    count = 0
+    try:
+        for p in root.rglob("*.jsonl"):
+            if p.is_file():
+                count += 1
+    except OSError:
+        return count
+    return count
+
+
+def _provider_cache_counts(db_path: Optional[Union[str, Path]], provider: str) -> dict:
+    if not db_path:
+        return {"sessions": 0, "messages": 0}
+    try:
+        with connect(db_path) as conn:
+            row = conn.execute(
+                """
+                  SELECT COUNT(DISTINCT session_id) AS sessions,
+                         COUNT(*) AS messages
+                    FROM messages
+                   WHERE COALESCE(provider, 'claude') = ?
+                """,
+                (provider,),
+            ).fetchone()
+    except Exception:
+        return {"sessions": 0, "messages": 0}
+    return {"sessions": int(row["sessions"] or 0), "messages": int(row["messages"] or 0)}
+
+
 def _result_token_estimate(body) -> int:
     if isinstance(body, str):
         chars = len(body)

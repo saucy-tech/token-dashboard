@@ -384,7 +384,25 @@ def session_turns(db_path, session_id: str) -> list:
        ORDER BY timestamp ASC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, (session_id,))]
+        rows = [dict(r) for r in c.execute(sql, (session_id,))]
+        if not rows:
+            return rows
+
+        tools = c.execute(
+            """
+              SELECT id, message_uuid, tool_name, target, result_tokens, is_error, timestamp
+                FROM tool_calls
+               WHERE session_id = ?
+               ORDER BY timestamp ASC, id ASC
+            """,
+            (session_id,),
+        ).fetchall()
+        by_message = {}
+        for tool in tools:
+            by_message.setdefault(tool["message_uuid"], []).append(dict(tool))
+        for row in rows:
+            row["tool_calls"] = by_message.get(row["uuid"], [])
+        return rows
 
 
 def daily_token_breakdown(db_path, since=None, until=None, provider: Optional[str] = None) -> list:

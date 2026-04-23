@@ -103,14 +103,16 @@ async function renderSession(root, id) {
     <div class="card" style="margin-top:16px">
       <h3>Turn-by-turn</h3>
       <table>
-        <thead><tr><th>time</th><th>type</th><th>model</th><th class="blur-sensitive">prompt / tools</th><th class="num">in</th><th class="num">out</th><th class="num">cache rd</th></tr></thead>
+        <thead><tr><th>time</th><th>type</th><th>model</th><th class="blur-sensitive">prompt / tools</th><th class="num">in</th><th class="num">out</th><th class="num">cache rd</th><th></th></tr></thead>
         <tbody>
-          ${turns.map(t => {
-            const tools = t.tool_calls_json ? JSON.parse(t.tool_calls_json) : [];
+          ${turns.map((t, i) => {
+            const tools = toolCalls(t);
+            const toolUses = tools.filter(x => x.tool_name !== '_tool_result');
             const summary = t.prompt_text ? fmt.short(t.prompt_text, 110)
-              : tools.length ? tools.map(x => x.name).join(' · ')
+              : toolUses.length ? toolUses.map(x => x.tool_name).join(' · ')
               : '';
-            return `<tr>
+            const hasDetail = Boolean(t.prompt_text || tools.length);
+            return `<tr class="${hasDetail ? 'session-row-with-detail' : ''}" data-i="${i}">
               <td class="mono">${(t.timestamp || '').slice(11,19)}</td>
               <td>${t.type}${t.is_sidechain ? ' <span class="badge">side</span>' : ''}</td>
               <td>${t.model ? `<span class="badge ${fmt.modelClass(t.model)}">${fmt.htmlSafe(fmt.modelShort(t.model))}</span>` : ''}</td>
@@ -118,15 +120,106 @@ async function renderSession(root, id) {
               <td class="num">${fmt.int(t.input_tokens)}</td>
               <td class="num">${fmt.int(t.output_tokens)}</td>
               <td class="num">${fmt.int(t.cache_read_tokens)}</td>
-            </tr>`;
+              <td class="num">${hasDetail ? `<button class="ghost detail-toggle" data-i="${i}">Details</button>` : ''}</td>
+            </tr>
+            ${hasDetail ? detailRow(t, i, tools) : ''}`;
           }).join('')}
         </tbody>
       </table>
     </div>`;
+
+  root.querySelectorAll('.detail-toggle').forEach(btn => {
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleDetail(root, btn.dataset.i);
+    });
+  });
+  root.querySelectorAll('.session-row-with-detail').forEach(row => {
+    row.addEventListener('click', () => toggleDetail(root, row.dataset.i));
+  });
+  root.querySelectorAll('.copy-prompt').forEach(btn => {
+    btn.addEventListener('click', event => {
+      event.stopPropagation();
+      copyText(btn, turns[Number(btn.dataset.i)]?.prompt_text || '');
+    });
+  });
 }
 
 function sessionHref(sessionId, provider) {
   return '#/sessions/' + encodeURIComponent(sessionId) + (
     provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
   );
+}
+
+function toolCalls(turn) {
+  if (Array.isArray(turn.tool_calls)) return turn.tool_calls;
+  if (!turn.tool_calls_json) return [];
+  try {
+    return JSON.parse(turn.tool_calls_json).map(x => ({
+      tool_name: x.name,
+      target: x.target,
+      result_tokens: null,
+      is_error: 0,
+      timestamp: turn.timestamp,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function detailRow(turn, index, tools) {
+  return `
+    <tr class="session-detail-row" data-detail="${index}" hidden>
+      <td colspan="8">
+        <div class="session-detail">
+          ${turn.prompt_text ? `
+            <div class="session-detail-head">
+              <strong>Prompt text</strong>
+              <button class="ghost copy-prompt" data-i="${index}">Copy prompt</button>
+            </div>
+            <pre class="blur-sensitive">${fmt.htmlSafe(turn.prompt_text)}</pre>
+          ` : ''}
+          ${tools.length ? `
+            <div class="session-detail-head">
+              <strong>Tool calls</strong>
+              <span class="muted">${fmt.int(tools.length)} total</span>
+            </div>
+            <table class="tool-detail-table">
+              <thead><tr><th>time</th><th>tool</th><th>target / id</th><th class="num">result tokens</th><th>status</th></tr></thead>
+              <tbody>
+                ${tools.map(tool => `
+                  <tr>
+                    <td class="mono">${(tool.timestamp || '').slice(11,19)}</td>
+                    <td><span class="badge">${fmt.htmlSafe(tool.tool_name || 'tool')}</span></td>
+                    <td class="blur-sensitive">${fmt.htmlSafe(tool.target || '')}</td>
+                    <td class="num">${tool.result_tokens == null ? '—' : fmt.int(tool.result_tokens)}</td>
+                    <td>${tool.is_error ? '<span class="badge tool-error">error</span>' : '<span class="badge tool-ok">ok</span>'}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          ` : ''}
+        </div>
+      </td>
+    </tr>`;
+}
+
+function toggleDetail(root, index) {
+  const row = root.querySelector(`.session-detail-row[data-detail="${index}"]`);
+  const btn = root.querySelector(`.detail-toggle[data-i="${index}"]`);
+  if (!row) return;
+  row.hidden = !row.hidden;
+  if (btn) btn.textContent = row.hidden ? 'Details' : 'Hide';
+}
+
+async function copyText(btn, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const label = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => {
+      btn.textContent = label;
+    }, 1200);
+  } catch {
+    btn.textContent = 'Copy failed';
+  }
 }

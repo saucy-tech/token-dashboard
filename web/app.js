@@ -87,6 +87,61 @@ export function providerTabs(activeKey) {
     </div>`;
 }
 
+export function dataSourcePanel(status, opts = {}) {
+  const sources = Array.isArray(status?.sources) ? status.sources : [];
+  if (!sources.length) return '';
+  const missing = sources.filter(s => s.status !== 'connected' && s.status !== 'disabled');
+  const waiting = sources.filter(s => s.connected && (s.cached_sessions || 0) === 0);
+  const title = missing.length || waiting.length ? 'Connect data sources' : 'Data sources';
+  const body = missing.length
+    ? 'Some local histories are not available yet. Connected sources will keep scanning automatically while the dashboard is open.'
+    : waiting.length
+      ? 'Local logs were found. The next scan will populate the dashboard cache.'
+      : 'Configured local histories are available for scanning.';
+  const compactClass = opts.compact ? ' source-panel-compact' : '';
+  return `
+    <div class="card source-panel${compactClass}">
+      <div class="source-panel-head">
+        <div>
+          <h3>${title}</h3>
+          <p class="muted">${body}</p>
+        </div>
+        ${opts.scanButton ? '<button class="ghost" data-scan-now>Scan now</button>' : ''}
+      </div>
+      <div class="source-grid">
+        ${sources.map(sourceCard).join('')}
+      </div>
+    </div>`;
+}
+
+function sourceCard(s) {
+  const statusLabel = {
+    connected: 'Connected',
+    empty: 'No logs yet',
+    missing: 'Missing',
+    disabled: 'Disabled',
+  }[s.status] || fmt.providerLabel(s.status);
+  const detail = sourceDetail(s);
+  return `
+    <div class="source-card source-${fmt.htmlSafe(s.status || 'unknown')}">
+      <div class="source-title">
+        <span>${fmt.htmlSafe(s.label || fmt.providerLabel(s.provider))}</span>
+        <span class="badge ${fmt.providerClass(s.provider)}">${fmt.htmlSafe(statusLabel)}</span>
+      </div>
+      <div class="source-path" title="${fmt.htmlSafe(s.path || '')}">${fmt.htmlSafe(s.path || 'not configured')}</div>
+      <div class="source-detail">${detail}</div>
+    </div>`;
+}
+
+function sourceDetail(s) {
+  if (s.status === 'disabled') return fmt.htmlSafe(s.hint || 'Disabled for this run.');
+  if (s.status === 'missing') return fmt.htmlSafe(s.hint || 'Folder not found.');
+  if (s.status === 'empty') return 'Folder found, but no JSONL logs were found yet.';
+  const logs = fmt.int(s.log_files) + ' log file' + (s.log_files === 1 ? '' : 's');
+  const sessions = fmt.int(s.cached_sessions) + ' cached session' + (s.cached_sessions === 1 ? '' : 's');
+  return `${logs} · ${sessions}`;
+}
+
 export function withQuery(url, params = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {

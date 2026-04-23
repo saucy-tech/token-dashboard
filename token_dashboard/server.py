@@ -20,7 +20,7 @@ from .db import (
 )
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
-from .scanner import scan_sources
+from .scanner import data_source_status, scan_sources
 from .skills import cached_catalog
 
 
@@ -227,6 +227,8 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 return _send_json(self, rows)
             if path == "/api/providers":
                 return _send_json(self, provider_breakdown(db_path, since, until, provider=provider))
+            if path == "/api/sources":
+                return _send_json(self, data_source_status(projects_dir, codex_dir, db_path))
             if path.startswith("/api/sessions/"):
                 sid = path.rsplit("/", 1)[1]
                 return _send_json(self, session_turns(db_path, sid))
