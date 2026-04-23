@@ -20,6 +20,22 @@ export const fmt = {
     return '';
   },
   modelShort: m => (m || '').replace('claude-', ''),
+  providerClass: p => {
+    const s = (p || '').toLowerCase();
+    if (s === 'claude') return 'provider-claude';
+    if (s === 'codex')  return 'provider-codex';
+    if (s === 'warp')   return 'provider-warp';
+    return '';
+  },
+  providerLabel: p => {
+    const s = (p || '').toLowerCase();
+    if (!s) return 'Unknown';
+    return s[0].toUpperCase() + s.slice(1);
+  },
+  sessionShort: s => {
+    const raw = (s || '').includes(':') ? s.split(':').slice(1).join(':') : (s || '');
+    return raw.slice(0, 8) + (raw.length > 8 ? '…' : '');
+  },
   ts: t => (t || '').slice(0, 16).replace('T', ' '),
 };
 
@@ -30,6 +46,60 @@ export async function api(path, opts) {
 }
 
 export const state = { plan: 'api', pricing: null };
+export const PROVIDER_OPTIONS = [
+  { key: 'all', label: 'All providers' },
+  { key: 'claude', label: 'Claude' },
+  { key: 'codex', label: 'Codex' },
+  { key: 'warp', label: 'Warp' },
+];
+
+export function currentHashPath() {
+  return (location.hash.replace(/^#/, '').split('?')[0]) || '/overview';
+}
+
+export function readHashParam(key, fallback = null) {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  return params.get(key) ?? fallback;
+}
+
+export function writeHashParams(updates, base = currentHashPath()) {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  Object.entries(updates).forEach(([key, value]) => {
+    if (value == null || value === '') params.delete(key);
+    else params.set(key, value);
+  });
+  const query = params.toString();
+  location.hash = '#' + base + (query ? '?' + query : '');
+}
+
+export function readProvider() {
+  const key = (readHashParam('provider', 'all') || 'all').toLowerCase();
+  return PROVIDER_OPTIONS.find(p => p.key === key) || PROVIDER_OPTIONS[0];
+}
+
+export function providerTabs(activeKey) {
+  return `
+    <div class="range-tabs provider-tabs" role="tablist">
+      ${PROVIDER_OPTIONS.map(p => `
+        <button data-provider="${p.key}" class="${p.key === activeKey ? 'active' : ''}">
+          ${p.label}
+        </button>`).join('')}
+    </div>`;
+}
+
+export function withQuery(url, params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value == null || value === '' || value === 'all') return;
+    query.set(key, value);
+  });
+  const qs = query.toString();
+  return qs ? `${url}${url.includes('?') ? '&' : '?'}${qs}` : url;
+}
+
+export function exportHref(name, format, params = {}) {
+  return withQuery(`/api/export/${name}.${format}`, params);
+}
 
 const ROUTES = {
   '/overview': () => import('/web/routes/overview.js'),
@@ -45,7 +115,7 @@ function buildTopbar() {
   const wrap = document.createElement('header');
   wrap.className = 'topbar';
   wrap.innerHTML = `
-    <div class="brand">Token Dashboard</div>
+    <div class="brand">Agent Dashboard</div>
     <nav>
       ${Object.keys(ROUTES).map(p => `<a href="#${p}" data-route="${p}">${p.slice(1)}</a>`).join('')}
     </nav>

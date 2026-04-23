@@ -1,8 +1,8 @@
-# Token Dashboard
+# Agent Dashboard
 
-A local dashboard that reads the JSONL transcripts Claude Code writes to `~/.claude/projects/` and turns them into per-prompt cost analytics, tool/file heatmaps, subagent attribution, cache analytics, project comparisons, and a rule-based tips engine.
+A local dashboard that reads Claude Code transcripts from `~/.claude/projects/` and Codex session logs from `~/.codex/`, then turns them into per-prompt cost analytics, tool/file heatmaps, cache analytics, project comparisons, and provider-aware usage summaries.
 
-**Everything runs locally.** No data leaves your machine — no telemetry, no API calls for your data, no login.
+**Everything runs locally.** No data leaves your machine, there is no login, and your session files stay under your own home directory.
 
 ![Overview tab — totals and daily charts](docs/images/dashboard-overview-top.jpg)
 
@@ -19,7 +19,7 @@ A local dashboard that reads the JSONL transcripts Claude Code writes to `~/.cla
 ## Prerequisites
 
 - **Python 3.8 or newer** — already installed on macOS and most Linux. On Windows: `winget install Python.Python.3.12` or download from python.org.
-- **Claude Code** — installed and with at least one session run. The dashboard reads those sessions. If you just installed Claude Code and haven't used it yet, run at least one prompt first.
+- **Claude Code and/or Codex** — installed and with at least one session run. The dashboard reads those local session files. If you just installed either tool, run at least one prompt first.
 - **A web browser.** Any modern one.
 
 No `pip install`. No Node.js. No build step.
@@ -35,7 +35,7 @@ python3 cli.py dashboard
 > On Windows, if `python3` isn't on your PATH, substitute `py -3` for `python3` in every command below.
 
 The command:
-1. Scans `~/.claude/projects/` (first run can take 20–60 seconds on a heavy user's machine).
+1. Scans `~/.claude/projects/` and `~/.codex/` (first run can take longer on a heavy user's machine).
 2. Starts a local server at http://127.0.0.1:8080.
 3. Opens your default browser to that URL.
 
@@ -43,19 +43,19 @@ Leave it running; it re-scans every 30 seconds and pushes updates live. Stop wit
 
 ## Where the data comes from
 
-Claude Code writes one JSONL file per session here:
+The dashboard currently reads these local sources:
 
-| OS | Path |
+| Tool | Default path |
 |---|---|
-| macOS / Linux | `~/.claude/projects/<project-slug>/<session-id>.jsonl` |
-| Windows | `C:\Users\<you>\.claude\projects\<project-slug>\<session-id>.jsonl` |
+| Claude Code | `~/.claude/projects/<project-slug>/<session-id>.jsonl` |
+| Codex | `~/.codex/sessions/**/*.jsonl` and `~/.codex/archived_sessions/*.jsonl` |
 
-The dashboard never modifies those files — it only reads them and keeps a local SQLite cache at `~/.claude/token-dashboard.db`.
+The dashboard never modifies those files. It only reads them and keeps a local SQLite cache at `~/.claude/token-dashboard.db`.
 
 To point at a different location:
 
 ```bash
-python3 cli.py dashboard --projects-dir /path/to/projects --db /path/to/cache.db
+python3 cli.py dashboard --projects-dir /path/to/claude-projects --codex-dir /path/to/.codex --db /path/to/cache.db
 ```
 
 ### Environment variables
@@ -65,9 +65,10 @@ python3 cli.py dashboard --projects-dir /path/to/projects --db /path/to/cache.db
 | `PORT` | `8080` | Port the local web server listens on |
 | `HOST` | `127.0.0.1` | Bind address. Keep the default. Setting `0.0.0.0` exposes your entire prompt history to anyone on your local network — don't do this on any network you don't fully control (no coffee-shop Wi-Fi, no coworking spaces). |
 | `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Where to scan for session JSONL files |
+| `CODEX_HOME` | `~/.codex` | Where to scan for active and archived Codex session files |
 | `TOKEN_DASHBOARD_DB` | `~/.claude/token-dashboard.db` | SQLite cache location |
 
-Pricing lives in [`pricing.json`](pricing.json). Edit it directly if model prices change or to add a new plan.
+Pricing lives in [`pricing.json`](pricing.json). Claude pricing is bundled today. Codex pricing is not yet bundled, so mixed-provider cost views can be partial until those rates are added.
 
 ## CLI reference
 
@@ -81,6 +82,7 @@ python3 cli.py dashboard     # scan + serve the UI at http://localhost:8080
 # dashboard flags
 python3 cli.py dashboard --no-open   # don't auto-open the browser
 python3 cli.py dashboard --no-scan   # skip the initial scan (use cached DB only)
+python3 cli.py dashboard --no-codex  # scan Claude only
 ```
 
 Change the port: `PORT=9000 python3 cli.py dashboard`.
@@ -89,7 +91,7 @@ Change the port: `PORT=9000 python3 cli.py dashboard`.
 
 The dashboard is a single page with a hash-router tab bar across the top. Each tab is backed by its own JSON API under `/api/`:
 
-- **Overview** — all-time input/output/cache tokens, sessions, turns, estimated cost on your chosen plan, daily work and cache-read charts, tokens-by-project, token share by model, top tools by call count, and recent sessions. This is the landing tab.
+- **Overview** — all-time input/output/cache tokens, sessions, turns, provider summaries, estimated cost on your chosen plan, daily work and cache-read charts, tokens-by-project, token share by model, top tools by call count, and recent sessions. This is the landing tab.
 - **Prompts** — your most expensive user prompts ranked by tokens. Click any row to see the assistant response, tool calls made, and the size of each tool result.
 - **Sessions** — turn-by-turn view of any single session, with per-turn tokens and tool calls.
 - **Projects** — per-project comparison: tokens, session counts, and which files were touched most.
@@ -98,6 +100,8 @@ The dashboard is a single page with a hash-router tab bar across the top. Each t
 - **Settings** — switch pricing between API / Pro / Max / Max-20x so cost figures everywhere else reflect your actual plan.
 
 The Overview tab also has a built-in "What do these numbers mean?" panel that explains input/output/cache tokens in plain English.
+
+Warp is intentionally not a built-in source yet. The current MVP leaves room for a Warp add-on once a reliable local usage source is available.
 
 ## Troubleshooting
 
@@ -111,7 +115,7 @@ The Overview tab also has a built-in "What do these numbers mean?" panel that ex
 
 ## Accuracy note
 
-Claude Code writes each assistant response 2–3 times to disk while it streams (the same API message gets snapshotted as output grows). The dashboard dedupes these by `message.id` so the final tally matches what the API actually billed. If you compare against another tool that sums every JSONL row, expect this dashboard's numbers to be lower — and closer to reality.
+Claude Code writes each assistant response 2–3 times to disk while it streams (the same API message gets snapshotted as output grows). The dashboard dedupes these by `message.id` so the final tally matches what the API actually billed. Codex sessions are parsed turn-by-turn from the local JSONL event stream and aggregated into one assistant row per turn.
 
 ## Privacy
 
@@ -119,7 +123,7 @@ Nothing leaves your machine. No telemetry. No remote calls for your data. The br
 
 ## Tech stack
 
-Python 3 (stdlib only) for the CLI, scanner, and HTTP server. SQLite for the local cache. Vanilla JS + ECharts for the UI, no build step. Dark theme, hash-based router, server-sent events for live refresh.
+Python 3 (stdlib only) for the CLI, scanner, and HTTP server. SQLite for the local cache. Vanilla JS + ECharts for the UI, no build step. Hash-based router, server-sent events for live refresh.
 
 Data flow: `cli.py` → `token_dashboard/scanner.py` → SQLite DB; `token_dashboard/server.py` exposes `/api/*` JSON routes and serves `web/`.
 
@@ -127,6 +131,7 @@ Data flow: `cli.py` → `token_dashboard/scanner.py` → SQLite DB; `token_dashb
 
 - [`CLAUDE.md`](CLAUDE.md) — conventions and architecture overview (also picked up automatically by Claude Code)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to develop and test
+- [`docs/MVP-PRD.md`](docs/MVP-PRD.md) — MVP scope and next-step product roadmap
 - [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) — rough edges
 - [`docs/inspiration.md`](docs/inspiration.md) — prior art and how this project diverges
 

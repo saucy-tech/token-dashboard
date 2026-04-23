@@ -18,7 +18,11 @@ class CliTests(unittest.TestCase):
         self.db = os.path.join(self.tmp, "t.db")
 
     def _run(self, *args):
-        env = {**os.environ, "TOKEN_DASHBOARD_DB": self.db}
+        env = {
+            **os.environ,
+            "TOKEN_DASHBOARD_DB": self.db,
+            "CODEX_HOME": os.path.join(self.tmp, "missing-codex-home"),
+        }
         return subprocess.run(
             [sys.executable, "cli.py", *args],
             cwd=ROOT, env=env, capture_output=True, text=True,

@@ -1,4 +1,13 @@
-import { api, fmt } from '/web/app.js';
+import {
+  api,
+  exportHref,
+  fmt,
+  providerTabs,
+  readHashParam,
+  readProvider,
+  withQuery,
+  writeHashParams,
+} from '/web/app.js';
 
 const SORTS = [
   { key: 'tokens', label: 'Most tokens' },
@@ -6,20 +15,32 @@ const SORTS = [
 ];
 
 function readSort() {
-  const q = (location.hash.split('?')[1] || '');
-  const m = /(?:^|&)sort=([^&]+)/.exec(q);
-  const k = m && decodeURIComponent(m[1]);
+  const k = readHashParam('sort');
   return SORTS.find(s => s.key === k) || SORTS[0];
 }
 
 function writeSort(key) {
-  const base = (location.hash.replace(/^#/, '').split('?')[0]) || '/prompts';
-  location.hash = '#' + base + '?sort=' + encodeURIComponent(key);
+  writeHashParams({ sort: key });
+}
+
+function writeProvider(key) {
+  writeHashParams({ provider: key === 'all' ? null : key });
+}
+
+function sessionHref(sessionId, provider) {
+  return '#/sessions/' + encodeURIComponent(sessionId) + (
+    provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
+  );
 }
 
 export default async function (root) {
   const sort = readSort();
-  const rows = await api('/api/prompts?limit=100&sort=' + encodeURIComponent(sort.key));
+  const provider = readProvider();
+  const rows = await api(withQuery('/api/prompts', {
+    limit: 100,
+    sort: sort.key,
+    provider: provider.key === 'all' ? null : provider.key,
+  }));
 
   const sortTabs = `
     <div class="range-tabs" role="tablist">
@@ -29,6 +50,12 @@ export default async function (root) {
   const subtitle = sort.key === 'recent'
     ? 'Your latest prompts and the assistant turn each one triggered. Click a row to see the full prompt.'
     : 'The prompts that cost the most tokens. Click a row to see the full prompt.';
+  const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
+  const exportParams = {
+    limit: 100,
+    sort: sort.key,
+    provider: provider.key === 'all' ? null : provider.key,
+  };
 
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
@@ -37,12 +64,24 @@ export default async function (root) {
       ${sortTabs}
     </div>
 
+    <div class="flex" style="margin:-4px 0 16px;justify-content:flex-end">
+      ${providerTabs(provider.key)}
+    </div>
+
     <div class="card">
-      <p class="muted" style="margin:0 0 14px">${subtitle}</p>
+      <div class="flex" style="margin:0 0 14px;align-items:flex-start">
+        <p class="muted" style="margin:0">${subtitle} Showing ${fmt.htmlSafe(selectedProvider)}.</p>
+        <span class="spacer"></span>
+        <div class="export-actions">
+          <a href="${exportHref('prompts', 'csv', exportParams)}" class="button-link">Export CSV</a>
+          <a href="${exportHref('prompts', 'json', exportParams)}" class="button-link">Export JSON</a>
+        </div>
+      </div>
       <table id="prompts">
         <thead><tr>
           <th>${sort.key === 'recent' ? 'when' : 'cache cost'}</th>
           <th>prompt</th>
+          <th>provider</th>
           <th>model</th>
           <th class="num">tokens</th>
           <th class="num">cache rd</th>
@@ -53,11 +92,12 @@ export default async function (root) {
             <tr data-i="${i}" style="cursor:pointer">
               <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : fmt.usd4(r.estimated_cost_usd)}</td>
               <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
+              <td><span class="badge ${fmt.providerClass(r.provider)}">${fmt.htmlSafe(fmt.providerLabel(r.provider))}</span></td>
               <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
               <td class="num">${fmt.int(r.billable_tokens)}</td>
               <td class="num">${fmt.int(r.cache_read_tokens)}</td>
-              <td><a href="#/sessions/${encodeURIComponent(r.session_id)}" class="mono" onclick="event.stopPropagation()">${fmt.htmlSafe(r.session_id.slice(0,8))}…</a></td>
-            </tr>`).join('') || '<tr><td colspan="6" class="muted">no prompts yet</td></tr>'}
+              <td><a href="${sessionHref(r.session_id, provider)}" class="mono" onclick="event.stopPropagation()">${fmt.htmlSafe(fmt.sessionShort(r.session_id))}</a></td>
+            </tr>`).join('') || '<tr><td colspan="7" class="muted">no prompts yet</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -65,10 +105,11 @@ export default async function (root) {
   `;
 
   root.querySelectorAll('.range-tabs button').forEach(btn => {
-    btn.addEventListener('click', () => writeSort(btn.dataset.sort));
+    if (btn.dataset.sort) btn.addEventListener('click', () => writeSort(btn.dataset.sort));
+    if (btn.dataset.provider) btn.addEventListener('click', () => writeProvider(btn.dataset.provider));
   });
 
-  root.querySelectorAll('#prompts tbody tr').forEach(tr => {
+  root.querySelectorAll('#prompts tbody tr[data-i]').forEach(tr => {
     tr.addEventListener('click', () => {
       const r = rows[Number(tr.dataset.i)];
       const drawer = document.getElementById('drawer');
@@ -77,6 +118,7 @@ export default async function (root) {
           <h3 style="display:flex;align-items:center">
             <span>Prompt detail</span>
             <span class="spacer"></span>
+            <span class="badge ${fmt.providerClass(r.provider)}">${fmt.htmlSafe(fmt.providerLabel(r.provider))}</span>
             <span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span>
           </h3>
           <pre class="blur-sensitive">${fmt.htmlSafe(r.prompt_text || '')}</pre>
@@ -84,7 +126,7 @@ export default async function (root) {
             <span class="muted">${fmt.ts(r.timestamp)}</span>
             <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ~${fmt.usd4(r.estimated_cost_usd)} cache cost</span>
             <span class="spacer"></span>
-            <a href="#/sessions/${encodeURIComponent(r.session_id)}">Open session →</a>
+            <a href="${sessionHref(r.session_id, provider)}">Open session →</a>
           </div>
         </div>`;
       drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

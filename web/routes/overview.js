@@ -1,4 +1,13 @@
-import { api, fmt, state } from '/web/app.js';
+import {
+  api,
+  fmt,
+  providerTabs,
+  readHashParam,
+  readProvider,
+  state,
+  withQuery,
+  writeHashParams,
+} from '/web/app.js';
 import { barChart, donutChart, groupedBarChart, stackedBarChart } from '/web/charts.js';
 
 const RANGES = [
@@ -9,15 +18,12 @@ const RANGES = [
 ];
 
 function readRange() {
-  const q = (location.hash.split('?')[1] || '');
-  const m = /(?:^|&)range=([^&]+)/.exec(q);
-  const k = m && decodeURIComponent(m[1]);
+  const k = readHashParam('range');
   return RANGES.find(r => r.key === k) || RANGES[1];
 }
 
 function writeRange(key) {
-  const base = (location.hash.replace(/^#/, '').split('?')[0]) || '/overview';
-  location.hash = '#' + base + '?range=' + encodeURIComponent(key);
+  writeHashParams({ range: key });
 }
 
 function sinceIso(range) {
@@ -25,22 +31,43 @@ function sinceIso(range) {
   return new Date(Date.now() - range.days * 86400 * 1000).toISOString();
 }
 
-function withSince(url, since) {
-  if (!since) return url;
-  return url + (url.includes('?') ? '&' : '?') + 'since=' + encodeURIComponent(since);
+function writeProvider(key) {
+  writeHashParams({ provider: key === 'all' ? null : key });
+}
+
+function queryParams(since, provider) {
+  return {
+    since,
+    provider: provider.key === 'all' ? null : provider.key,
+  };
+}
+
+function sessionsHref(provider) {
+  return provider.key === 'all'
+    ? '#/sessions'
+    : '#/sessions?provider=' + encodeURIComponent(provider.key);
+}
+
+function sessionHref(sessionId, provider) {
+  return '#/sessions/' + encodeURIComponent(sessionId) + (
+    provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
+  );
 }
 
 export default async function (root) {
   const range = readRange();
+  const provider = readProvider();
   const since = sinceIso(range);
+  const params = queryParams(since, provider);
 
-  const [totals, projects, sessions, tools, daily, byModel] = await Promise.all([
-    api(withSince('/api/overview', since)),
-    api(withSince('/api/projects', since)),
-    api(withSince('/api/sessions?limit=10', since)),
-    api(withSince('/api/tools', since)),
-    api(withSince('/api/daily', since)),
-    api(withSince('/api/by-model', since)),
+  const [totals, projects, sessions, tools, daily, byModel, providers] = await Promise.all([
+    api(withQuery('/api/overview', params)),
+    api(withQuery('/api/projects', params)),
+    api(withQuery('/api/sessions', { ...params, limit: 10 })),
+    api(withQuery('/api/tools', params)),
+    api(withQuery('/api/daily', params)),
+    api(withQuery('/api/by-model', params)),
+    api(withQuery('/api/providers', params)),
   ]);
 
   const cacheCreate =
@@ -53,17 +80,48 @@ export default async function (root) {
       <div class="value" title="${fullVal}">${compactVal}</div>
     </div>`;
 
+  const providerCards = providers.map(p => {
+    const billable =
+      (p.input_tokens || 0) +
+      (p.output_tokens || 0) +
+      (p.cache_create_5m_tokens || 0) +
+      (p.cache_create_1h_tokens || 0);
+    return `
+      <div class="card">
+        <h3 style="display:flex;align-items:center">
+          <span>${fmt.htmlSafe(fmt.providerLabel(p.provider))}</span>
+          <span class="spacer"></span>
+          <span class="badge ${fmt.providerClass(p.provider)}">${fmt.htmlSafe(p.provider)}</span>
+        </h3>
+        <div class="flex muted" style="font-family:var(--mono);font-size:12px;justify-content:space-between">
+          <span>${fmt.int(p.sessions)} sessions</span>
+          <span>${fmt.int(p.turns)} turns</span>
+        </div>
+        <div style="margin-top:10px;font-family:var(--mono);font-size:22px;letter-spacing:-0.03em">${fmt.compact(billable)}</div>
+        <div class="muted" style="margin-top:4px;font-size:12px">billable tokens</div>
+      </div>`;
+  }).join('');
+
+  const costSub = totals.cost_partial
+    ? `<div class="sub">${totals.unpriced_models || 0} model${(totals.unpriced_models || 0) === 1 ? '' : 's'} unpriced</div>`
+    : planSubtitle();
+
   const rangeTabs = `
     <div class="range-tabs" role="tablist">
       ${RANGES.map(r => `<button data-range="${r.key}" class="${r.key === range.key ? 'active' : ''}">${r.label}</button>`).join('')}
     </div>`;
+  const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
 
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Overview</h2>
-      <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'}</span>
+      <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'} · ${fmt.htmlSafe(selectedProvider)}</span>
       <div class="spacer"></div>
       ${rangeTabs}
+    </div>
+
+    <div class="flex" style="margin:-4px 0 16px;justify-content:flex-end">
+      ${providerTabs(provider.key)}
     </div>
 
     <div class="row cols-7">
@@ -76,32 +134,37 @@ export default async function (root) {
       <div class="card kpi cost">
         <div class="label">Est. cost</div>
         <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
-        ${planSubtitle()}
+        ${costSub}
       </div>
     </div>
 
     <details class="card glossary" style="margin-top:16px">
       <summary><h3 style="display:inline-block;margin:0">What do these numbers mean?</h3><span class="muted" style="font-size:12px">— click to expand</span></summary>
       <dl>
-        <dt>Session</dt><dd>One run of Claude Code (from <code>claude</code> to exit). Each session is a single <code>.jsonl</code> file.</dd>
-        <dt>Turn</dt><dd>One message you sent to Claude. Each turn triggers a response (possibly with tool calls in between).</dd>
-        <dt>Input tokens</dt><dd>The new text you (and tool results) sent to Claude this turn. Billed at the full input rate.</dd>
-        <dt>Output tokens</dt><dd>The text Claude wrote back. Billed at the highest rate — usually the biggest cost driver per turn.</dd>
-        <dt>Cache read</dt><dd>Tokens Claude re-used from a cache (your CLAUDE.md, previously-read files, the conversation so far). ~10× cheaper than fresh input. High cache-read counts = good cost hygiene.</dd>
+        <dt>Session</dt><dd>One run of a supported coding assistant, stored locally as a transcript or session log.</dd>
+        <dt>Turn</dt><dd>One message you sent to the assistant. Each turn triggers at least one model response and may include tool calls.</dd>
+        <dt>Input tokens</dt><dd>The new text you and your tool results sent to the model. Billed at the full input rate when pricing is available.</dd>
+        <dt>Output tokens</dt><dd>The text the assistant wrote back. This is usually the biggest cost driver per turn.</dd>
+        <dt>Cache read</dt><dd>Tokens re-used from cached context. High cache-read counts usually mean better context re-use and lower marginal cost.</dd>
         <dt>Cache create</dt><dd>Writing something into the cache for the first time. One-time cost; pays off on the next turn.</dd>
         <dt>Billable tokens</dt><dd>Input + Output + Cache create. Cache reads are billed separately (and much cheaper).</dd>
       </dl>
     </details>
 
+    ${providers.length ? `
+      <div class="row cols-3" style="margin-top:16px">
+        ${providerCards}
+      </div>` : ''}
+
     <div class="row cols-2" style="margin-top:16px">
       <div class="card">
         <h3>Your daily work</h3>
-        <p class="muted" style="margin:-4px 0 10px;font-size:12px">Tokens you paid for: what you sent (<b>input</b>), what Claude wrote (<b>output</b>), and what got stored for re-use (<b>cache create</b>).</p>
+        <p class="muted" style="margin:-4px 0 10px;font-size:12px">Tokens you paid for: what you sent (<b>input</b>), what the assistant wrote (<b>output</b>), and what got stored for re-use (<b>cache create</b>).</p>
         <div id="ch-daily-billable" style="height:260px"></div>
       </div>
       <div class="card">
         <h3>Daily cache reads</h3>
-        <p class="muted" style="margin:-4px 0 10px;font-size:12px"><b>Cache reads</b> are cheap re-uses of things Claude already saw (like your CLAUDE.md). They cost ~10× less than regular input tokens — high numbers here are a good thing.</p>
+        <p class="muted" style="margin:-4px 0 10px;font-size:12px"><b>Cache reads</b> are cheap re-uses of things the model already saw. They usually cost far less than fresh input tokens.</p>
         <div id="ch-daily-cache" style="height:260px"></div>
       </div>
     </div>
@@ -110,7 +173,7 @@ export default async function (root) {
       <div class="card"><h3>Tokens by project</h3><div id="ch-projects" style="height:320px"></div></div>
       <div class="card">
         <h3>Token usage by model</h3>
-        <p class="muted" style="margin:-4px 0 4px;font-size:12px">Share of billable tokens per Claude model.</p>
+        <p class="muted" style="margin:-4px 0 4px;font-size:12px">Share of billable tokens per model in the current filtered view.</p>
         <div id="ch-model" style="height:300px"></div>
       </div>
     </div>
@@ -118,14 +181,14 @@ export default async function (root) {
     <div class="row cols-2" style="margin-top:16px">
       <div class="card"><h3>Top tools (by call count)</h3><div id="ch-tools" style="height:320px"></div></div>
       <div class="card">
-        <h3 style="display:flex;align-items:center"><span>Recent sessions</span><span class="spacer"></span><a href="#/sessions" style="font-weight:400;font-size:12px">all →</a></h3>
+        <h3 style="display:flex;align-items:center"><span>Recent sessions</span><span class="spacer"></span><a href="${sessionsHref(provider)}" style="font-weight:400;font-size:12px">all →</a></h3>
         <table>
           <thead><tr><th>started</th><th>project</th><th class="num">tokens</th></tr></thead>
           <tbody>
             ${sessions.map(s => `
               <tr>
                 <td class="mono">${fmt.ts(s.started)}</td>
-                <td><a href="#/sessions/${encodeURIComponent(s.session_id)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</a></td>
+                <td><a href="${sessionHref(s.session_id, provider)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</a></td>
                 <td class="num">${fmt.compact(s.tokens)}</td>
               </tr>`).join('') || '<tr><td colspan="3" class="muted">no sessions in this range</td></tr>'}
           </tbody>
@@ -136,7 +199,8 @@ export default async function (root) {
 
   // range buttons
   root.querySelectorAll('.range-tabs button').forEach(btn => {
-    btn.addEventListener('click', () => writeRange(btn.dataset.range));
+    if (btn.dataset.range) btn.addEventListener('click', () => writeRange(btn.dataset.range));
+    if (btn.dataset.provider) btn.addEventListener('click', () => writeProvider(btn.dataset.provider));
   });
 
   // Your daily work — billable tokens (input + output + cache create)
