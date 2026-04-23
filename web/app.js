@@ -103,6 +103,7 @@ export function exportHref(name, format, params = {}) {
 
 const ROUTES = {
   '/overview': () => import('/web/routes/overview.js'),
+  '/comparison': () => import('/web/routes/comparison.js'),
   '/prompts':  () => import('/web/routes/prompts.js'),
   '/sessions': () => import('/web/routes/sessions.js'),
   '/projects': () => import('/web/routes/projects.js'),

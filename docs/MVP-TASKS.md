@@ -14,11 +14,11 @@ This is the working execution list for the Agent Dashboard MVP. The goal is to k
 - [x] Draft the MVP product direction in [MVP-PRD.md](/Users/brandon/Developer/token-dashboard/docs/MVP-PRD.md).
 - [x] Add provider filtering to Overview, Prompts, Sessions, and Projects.
 - [x] Add CSV and JSON export for prompts, sessions, and project summaries.
+- [x] Add a dedicated provider comparison view with Claude vs. Codex deltas over time.
 
 ## Next
 
-- [ ] Add a dedicated provider comparison view with Claude vs. Codex deltas over time.
-- [ ] Fill in Codex pricing mappings so estimated cost is less partial.
+- [x] Fill in Codex pricing mappings so estimated cost is less partial.
 - [ ] Add session drill-down improvements such as copied prompt text and tool-call detail.
 - [ ] Add a lightweight onboarding state that detects missing local data sources and explains what is connected.
 
