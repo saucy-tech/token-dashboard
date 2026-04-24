@@ -1,4 +1,12 @@
-import { api, fmt } from '/web/app.js';
+import {
+  api,
+  fmt,
+  providerTabs,
+  readHashParam,
+  readProvider,
+  withQuery,
+  writeHashParams,
+} from '/web/app.js';
 import { barChart } from '/web/charts.js';
 
 const RANGES = [
@@ -9,15 +17,12 @@ const RANGES = [
 ];
 
 function readRange() {
-  const q = (location.hash.split('?')[1] || '');
-  const m = /(?:^|&)range=([^&]+)/.exec(q);
-  const k = m && decodeURIComponent(m[1]);
-  return RANGES.find(r => r.key === k) || RANGES[1];
+  const key = readHashParam('range');
+  return RANGES.find(range => range.key === key) || RANGES[1];
 }
 
 function writeRange(key) {
-  const base = (location.hash.replace(/^#/, '').split('?')[0]) || '/skills';
-  location.hash = '#' + base + '?range=' + encodeURIComponent(key);
+  writeHashParams({ range: key });
 }
 
 function sinceIso(range) {
@@ -27,8 +32,12 @@ function sinceIso(range) {
 
 export default async function (root) {
   const range = readRange();
+  const provider = readProvider();
   const since = sinceIso(range);
-  const url = '/api/skills' + (since ? '?since=' + encodeURIComponent(since) : '');
+  const url = withQuery('/api/skills', {
+    since,
+    provider: provider.key === 'all' ? null : provider.key,
+  });
   const skills = await api(url);
 
   const totalInvocations = skills.reduce((s, r) => s + r.invocations, 0);
@@ -42,9 +51,12 @@ export default async function (root) {
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Skills</h2>
-      <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'}</span>
+      <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'} · ${fmt.htmlSafe(provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key))}</span>
       <div class="spacer"></div>
       ${rangeTabs}
+    </div>
+    <div class="flex" style="margin:-4px 0 16px;justify-content:flex-end">
+      ${providerTabs(provider.key)}
     </div>
 
     <div class="row cols-2">
@@ -83,7 +95,10 @@ export default async function (root) {
   `;
 
   root.querySelectorAll('.range-tabs button').forEach(btn => {
-    btn.addEventListener('click', () => writeRange(btn.dataset.range));
+    if (btn.dataset.range) btn.addEventListener('click', () => writeRange(btn.dataset.range));
+    if (btn.dataset.provider) btn.addEventListener('click', () => {
+      writeHashParams({ provider: btn.dataset.provider === 'all' ? null : btn.dataset.provider });
+    });
   });
 
   const top = skills.slice(0, 12);

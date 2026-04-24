@@ -228,6 +228,9 @@ def _migrate_add_tool_calls_provider(conn) -> None:
 def connect(path: Union[str, Path]):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
@@ -333,7 +336,13 @@ def overview_totals(db_path, since=None, until=None, provider: Optional[str] = N
         return dict(c.execute(sql, [*args, *prov_args]).fetchone())
 
 
-def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", provider: Optional[str] = None) -> list:
+def expensive_prompts(
+    db_path,
+    limit: int = 50,
+    sort: str = "tokens",
+    provider: Optional[str] = None,
+    offset: int = 0,
+) -> list:
     """User prompt joined with the immediately-following assistant turn's tokens.
 
     sort="tokens" (default) → largest billable first.
@@ -355,51 +364,73 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", provider: 
        WHERE u.type='user' AND u.prompt_text IS NOT NULL {prov}
        ORDER BY {order}
        LIMIT ?
+      OFFSET ?
     """
     with connect(db_path) as c:
-        rows = [dict(r) for r in c.execute(sql, [*prov_args, limit])]
+        rows = [dict(r) for r in c.execute(sql, [*prov_args, limit, offset])]
         for row in rows:
-            tools = c.execute("""
-              SELECT tool_name, target, COUNT(*) AS calls,
-                     COALESCE(SUM(result_tokens), 0) AS result_tokens,
-                     MAX(COALESCE(result_tokens, 0)) AS max_result_tokens
-                FROM tool_calls
-               WHERE message_uuid = ?
-               GROUP BY tool_name, target
-               ORDER BY result_tokens DESC, calls DESC
-               LIMIT 5
-            """, (row["assistant_uuid"],)).fetchall()
-            drivers = []
-            total_tool_tokens = 0
-            repeated_reads = 0
-            oversized_results = 0
-            for tool in tools:
-                result_tokens = int(tool["result_tokens"] or 0)
-                calls = int(tool["calls"] or 0)
-                total_tool_tokens += result_tokens
-                if tool["tool_name"] in ("Read", "Grep", "Glob", "LS") and calls > 1:
-                    repeated_reads += calls
-                if result_tokens >= 50000 or int(tool["max_result_tokens"] or 0) >= 50000:
-                    oversized_results += 1
-                drivers.append({
-                    "tool_name": tool["tool_name"],
-                    "target": tool["target"],
-                    "calls": calls,
-                    "result_tokens": result_tokens,
-                    "max_result_tokens": int(tool["max_result_tokens"] or 0),
-                })
-            reasons = []
-            if oversized_results:
-                reasons.append(f"{oversized_results} oversized tool result{'s' if oversized_results != 1 else ''}")
-            if repeated_reads:
-                reasons.append(f"{repeated_reads} repeated read/search calls")
-            if total_tool_tokens:
-                reasons.append(f"{total_tool_tokens:,} tool-result tokens")
-            if not reasons and row["cache_read_tokens"]:
-                reasons.append(f"{int(row['cache_read_tokens']):,} cache-read tokens")
-            row["cost_drivers"] = drivers
-            row["why_expensive"] = "; ".join(reasons) if reasons else "Token use came mostly from the assistant turn itself."
+            _enrich_prompt_row(c, row)
         return rows
+
+
+def recent_prompts(
+    db_path,
+    limit: int = 50,
+    sort: str = "tokens",
+    provider: Optional[str] = None,
+    offset: int = 0,
+) -> list:
+    """Compatibility helper used by `/api/prompts`."""
+    return expensive_prompts(
+        db_path,
+        limit=limit,
+        sort=sort,
+        provider=provider,
+        offset=offset,
+    )
+
+
+def _enrich_prompt_row(conn, row: dict) -> None:
+    tools = conn.execute("""
+      SELECT tool_name, target, COUNT(*) AS calls,
+             COALESCE(SUM(result_tokens), 0) AS result_tokens,
+             MAX(COALESCE(result_tokens, 0)) AS max_result_tokens
+        FROM tool_calls
+       WHERE message_uuid = ?
+       GROUP BY tool_name, target
+       ORDER BY result_tokens DESC, calls DESC
+       LIMIT 5
+    """, (row["assistant_uuid"],)).fetchall()
+    drivers = []
+    total_tool_tokens = 0
+    repeated_reads = 0
+    oversized_results = 0
+    for tool in tools:
+        result_tokens = int(tool["result_tokens"] or 0)
+        calls = int(tool["calls"] or 0)
+        total_tool_tokens += result_tokens
+        if tool["tool_name"] in ("Read", "Grep", "Glob", "LS") and calls > 1:
+            repeated_reads += calls
+        if result_tokens >= 50000 or int(tool["max_result_tokens"] or 0) >= 50000:
+            oversized_results += 1
+        drivers.append({
+            "tool_name": tool["tool_name"],
+            "target": tool["target"],
+            "calls": calls,
+            "result_tokens": result_tokens,
+            "max_result_tokens": int(tool["max_result_tokens"] or 0),
+        })
+    reasons = []
+    if oversized_results:
+        reasons.append(f"{oversized_results} oversized tool result{'s' if oversized_results != 1 else ''}")
+    if repeated_reads:
+        reasons.append(f"{repeated_reads} repeated read/search calls")
+    if total_tool_tokens:
+        reasons.append(f"{total_tool_tokens:,} tool-result tokens")
+    if not reasons and row["cache_read_tokens"]:
+        reasons.append(f"{int(row['cache_read_tokens']):,} cache-read tokens")
+    row["cost_drivers"] = drivers
+    row["why_expensive"] = "; ".join(reasons) if reasons else "Token use came mostly from the assistant turn itself."
 
 
 def project_summary(db_path, since=None, until=None, provider: Optional[str] = None) -> list:
@@ -585,7 +616,14 @@ def _normalize_usage_limit_settings(raw: dict) -> dict:
     }
 
 
-def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: Optional[str] = None) -> list:
+def recent_sessions(
+    db_path,
+    limit: int = 20,
+    since=None,
+    until=None,
+    provider: Optional[str] = None,
+    offset: int = 0,
+) -> list:
     ensure_session_rollups(db_path)
     where, args = [], []
     if since:
@@ -607,10 +645,78 @@ def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: 
        WHERE 1=1 {rng}{prov}
        ORDER BY ended DESC
        LIMIT ?
+      OFFSET ?
     """
     with connect(db_path) as c:
-        rows = [dict(r) for r in c.execute(sql, [*args, *prov_args, limit])]
+        rows = [dict(r) for r in c.execute(sql, [*args, *prov_args, limit, offset])]
     return rows
+
+
+def sessions_for_project(db_path, slug: str, limit: int = 20, since=None, until=None) -> list:
+    """Same shape as `recent_sessions`, scoped to sessions that touched `slug`."""
+    ensure_session_rollups(db_path)
+    where, args = [], []
+    if since:
+        where.append("ended_at >= ?")
+        args.append(since)
+    if until:
+        where.append("started_at < ?")
+        args.append(until)
+    rng = (" AND " + " AND ".join(where)) if where else ""
+    sql = f"""
+      SELECT session_id, project_slug, provider, session_label,
+             project_name, started_at AS started, ended_at AS ended,
+             turns, input_tokens + output_tokens AS tokens, billable_tokens,
+             input_tokens, output_tokens, cache_read_tokens,
+             cache_create_5m_tokens, cache_create_1h_tokens,
+             primary_model, model_count, is_current
+        FROM session_rollups
+       WHERE session_id IN (
+               SELECT DISTINCT session_id FROM messages WHERE project_slug = ?
+             ) {rng}
+       ORDER BY ended DESC
+       LIMIT ?
+    """
+    with connect(db_path) as c:
+        return [dict(r) for r in c.execute(sql, [slug, *args, limit])]
+
+
+def prompts_for_project(db_path, slug: str, limit: int = 10, sort: str = "tokens", since=None, until=None) -> list:
+    """Mirror of `expensive_prompts`, scoped to sessions that touched `slug`."""
+    order = "u.timestamp DESC" if sort == "recent" else "billable_tokens DESC"
+    where = ["u.type='user'", "u.prompt_text IS NOT NULL"]
+    args: list = []
+    if since:
+        where.append("u.timestamp >= ?")
+        args.append(since)
+    if until:
+        where.append("u.timestamp < ?")
+        args.append(until)
+    sql = f"""
+      SELECT u.uuid AS user_uuid, u.session_id, u.project_slug, u.timestamp,
+             COALESCE(a.provider, u.provider, 'claude') AS provider,
+             COALESCE(a.session_label, u.session_label) AS session_label,
+             u.prompt_text, u.prompt_chars,
+             a.uuid AS assistant_uuid, a.model,
+             COALESCE(a.input_tokens,0)+COALESCE(a.output_tokens,0)
+               +COALESCE(a.cache_create_5m_tokens,0)+COALESCE(a.cache_create_1h_tokens,0) AS billable_tokens,
+             COALESCE(a.cache_read_tokens,0) AS cache_read_tokens
+        FROM messages u
+        JOIN messages a ON a.parent_uuid = u.uuid AND a.type='assistant'
+       WHERE {' AND '.join(where)}
+         AND u.session_id IN (
+               SELECT DISTINCT session_id FROM messages WHERE project_slug = ?
+             )
+       ORDER BY {order}
+       LIMIT ?
+    """
+    args.append(slug)
+    args.append(limit)
+    with connect(db_path) as c:
+        rows = [dict(r) for r in c.execute(sql, args)]
+        for row in rows:
+            _enrich_prompt_row(c, row)
+        return rows
 
 
 def session_turns(db_path, session_id: str) -> list:

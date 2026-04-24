@@ -7,6 +7,7 @@ import io
 import json
 import mimetypes
 import queue
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,13 +16,16 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 from .db import (
-    overview_totals, expensive_prompts, project_summary,
+    overview_totals, expensive_prompts, recent_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
     ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
     current_session,
+    sessions_for_project, prompts_for_project,
     usage_limit_settings, set_usage_limit_settings,
 )
+
+SLUG_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
 from .scanner import data_source_status, scan_sources
@@ -31,7 +35,19 @@ from .skills import cached_catalog
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
-EVENTS: "queue.Queue[dict]" = queue.Queue()
+EVENTS: "queue.Queue[dict]" = queue.Queue(maxsize=200)
+
+
+def _enqueue(evt: dict) -> None:
+    """Drop the oldest event rather than blocking when the queue is full."""
+    try:
+        EVENTS.put_nowait(evt)
+    except queue.Full:
+        try:
+            EVENTS.get_nowait()
+        except queue.Empty:
+            pass
+        EVENTS.put_nowait(evt)
 
 MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
@@ -96,6 +112,14 @@ def _clamp_limit(raw, default: int) -> int:
     return max(1, min(v, MAX_LIMIT))
 
 
+def _clamp_offset(raw, default: int = 0) -> int:
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, v)
+
+
 def _serve_static(handler, rel: str) -> None:
     rel = rel.lstrip("/")
     p = (WEB_ROOT / rel).resolve()
@@ -153,6 +177,18 @@ def _billable_tokens(row: dict) -> int:
         + int(row.get("cache_create_5m_tokens") or 0)
         + int(row.get("cache_create_1h_tokens") or 0)
     )
+
+
+def _attach_prompt_costs(rows: list, pricing: dict) -> None:
+    for r in rows:
+        c = cost_for(r["model"], {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": r["cache_read_tokens"],
+            "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
+        }, pricing)
+        r["estimated_cost_usd"] = c["usd"]
+        r["estimated_cost_partial"] = c["usd"] is None
+        r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
 
 
 def _row_cost(model: str, row: dict, pricing: dict) -> dict:
@@ -391,15 +427,7 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 if name == "prompts":
                     sort = qs.get("sort", ["tokens"])[0]
                     rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
-                    for r in rows:
-                        c = cost_for(r["model"], {
-                            "input_tokens": 0, "output_tokens": 0,
-                            "cache_read_tokens": r["cache_read_tokens"],
-                            "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-                        }, pricing)
-                        r["estimated_cost_usd"] = c["usd"]
-                        r["estimated_cost_partial"] = c["usd"] is None
-                        r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
+                    _attach_prompt_costs(rows, pricing)
                     return _export_rows(self, rows, "prompts", fmt)
                 if name == "projects":
                     return _export_rows(
@@ -424,17 +452,35 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 return _send_error(self, 404, "unsupported export target")
             if path == "/api/prompts":
                 limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
+                offset = _clamp_offset(qs.get("offset", ["0"])[0], 0)
                 sort = qs.get("sort", ["tokens"])[0]
-                rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
-                for r in rows:
-                    c = cost_for(r["model"], {
-                        "input_tokens": 0, "output_tokens": 0,
-                        "cache_read_tokens": r["cache_read_tokens"],
-                        "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-                    }, pricing)
-                    r["estimated_cost_usd"] = c["usd"]
-                    r["estimated_cost_partial"] = c["usd"] is None
-                    r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
+                rows = recent_prompts(
+                    db_path,
+                    limit=limit,
+                    sort=sort,
+                    provider=provider,
+                    offset=offset,
+                )
+                _attach_prompt_costs(rows, pricing)
+                return _send_json(self, rows)
+            if path.startswith("/api/projects/") and path.endswith("/sessions"):
+                slug = path[len("/api/projects/"):-len("/sessions")]
+                if not SLUG_RE.match(slug):
+                    return _send_error(self, 400, "invalid project slug")
+                limit = _clamp_limit(qs.get("limit", ["20"])[0], 20)
+                return _send_json(self, sessions_for_project(
+                    db_path, slug, limit=limit, since=since, until=until,
+                ))
+            if path.startswith("/api/projects/") and path.endswith("/prompts"):
+                slug = path[len("/api/projects/"):-len("/prompts")]
+                if not SLUG_RE.match(slug):
+                    return _send_error(self, 400, "invalid project slug")
+                limit = _clamp_limit(qs.get("limit", ["10"])[0], 10)
+                sort = qs.get("sort", ["tokens"])[0]
+                rows = prompts_for_project(
+                    db_path, slug, limit=limit, sort=sort, since=since, until=until,
+                )
+                _attach_prompt_costs(rows, pricing)
                 return _send_json(self, rows)
             if path == "/api/projects":
                 return _send_json(self, project_summary(db_path, since, until, provider=provider))
@@ -444,6 +490,7 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 return _send_json(self, recent_sessions(
                     db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
                     since=since, until=until, provider=provider,
+                    offset=_clamp_offset(qs.get("offset", ["0"])[0], 0),
                 ))
             if path == "/api/current-session":
                 settings = usage_limit_settings(db_path)
@@ -484,14 +531,13 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 sid = path.rsplit("/", 1)[1]
                 return _send_json(self, session_turns(db_path, sid))
             if path == "/api/tips":
-                return _send_json(self, all_tips(db_path))
+                if provider not in (None, "claude", "codex"):
+                    return _send_error(self, 400, "invalid provider")
+                return _send_json(self, all_tips(db_path, provider=provider))
             if path == "/api/plan":
                 return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
             if path == "/api/settings/usage-limits":
                 return _send_json(self, usage_limit_settings(db_path))
-            if path == "/api/scan":
-                n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
-                return _send_json(self, n)
             if path == "/api/stream":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -535,6 +581,9 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
             if url.path == "/api/settings/usage-limits":
                 settings = set_usage_limit_settings(db_path, body)
                 return _send_json(self, settings)
+            if url.path == "/api/scan":
+                n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
+                return _send_json(self, n)
             self.send_response(404)
             self.end_headers()
 
@@ -546,9 +595,9 @@ def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None,
         try:
             n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
             if n["messages"] > 0:
-                EVENTS.put({"type": "scan", "n": n, "ts": time.time()})
+                _enqueue({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
-            EVENTS.put({"type": "error", "message": str(e)})
+            _enqueue({"type": "error", "message": str(e)})
         time.sleep(interval)
 
 

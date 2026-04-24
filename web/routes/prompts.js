@@ -10,6 +10,10 @@ import {
   writeHashParams,
 } from '/web/app.js';
 
+const PAGE_SIZE = 50;
+let _page = 0;
+let _promptScopeKey = '';
+
 const SORTS = [
   { key: 'tokens', label: 'Most tokens' },
   { key: 'recent', label: 'Most recent' },
@@ -37,9 +41,15 @@ function sessionHref(sessionId, provider) {
 export default async function (root) {
   const sort = readSort();
   const provider = readProvider();
+  const scopeKey = `${sort.key}|${provider.key}`;
+  if (scopeKey !== _promptScopeKey) {
+    _promptScopeKey = scopeKey;
+    _page = 0;
+  }
   const selectedPrompt = readHashParam('prompt');
   const rows = await api(withQuery('/api/prompts', {
-    limit: 100,
+    limit: PAGE_SIZE,
+    offset: 0,
     sort: sort.key,
     provider: provider.key === 'all' ? null : provider.key,
   }));
@@ -54,10 +64,11 @@ export default async function (root) {
     : 'The prompts that used the most billable tokens. Cache-read cost is shown only when the model has pricing.';
   const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
   const exportParams = {
-    limit: 100,
+    limit: 1000,
     sort: sort.key,
     provider: provider.key === 'all' ? null : provider.key,
   };
+  const hasMoreInitial = rows.length === PAGE_SIZE;
 
   root.innerHTML = `
     <div class="flex" style="margin-bottom:14px">
@@ -90,20 +101,13 @@ export default async function (root) {
           <th class="num">cache rd</th>
           <th>session</th>
         </tr></thead>
-        <tbody>
-          ${rows.map((r,i) => `
-            <tr class="provider-row ${fmt.providerClass(r.provider)}" data-i="${i}" data-prompt="${fmt.htmlSafe(r.user_uuid)}" style="cursor:pointer">
-              <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : promptCost(r)}</td>
-              <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
-              <td>${fmt.htmlSafe(fmt.short(r.why_expensive || '', 90))}</td>
-              <td>${providerBadge(r.provider)}</td>
-              <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
-              <td class="num">${fmt.int(r.billable_tokens)}</td>
-              <td class="num">${fmt.int(r.cache_read_tokens)}</td>
-              <td><a href="${sessionHref(r.session_id, provider)}" class="mono" onclick="event.stopPropagation()">${fmt.htmlSafe(fmt.sessionShort(r.session_id))}</a></td>
-            </tr>`).join('') || '<tr><td colspan="8" class="muted">no prompts yet</td></tr>'}
+        <tbody id="prompts-body">
+          ${rows.length ? rows.map((r, i) => promptRow(r, i, sort, provider)).join('') : '<tr id="prompts-empty"><td colspan="8" class="muted">no prompts yet</td></tr>'}
         </tbody>
       </table>
+      <div style="margin-top:12px">
+        <button class="ghost" id="prompts-load-more" ${hasMoreInitial ? '' : 'hidden'}>Load 50 more</button>
+      </div>
     </div>
     <div id="drawer"></div>
   `;
@@ -153,14 +157,68 @@ export default async function (root) {
     drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  root.querySelectorAll('#prompts tbody tr[data-i]').forEach(tr => {
-    tr.addEventListener('click', () => openPrompt(tr.dataset.i));
-  });
+  const promptBody = root.querySelector('#prompts-body');
+  const loadMore = root.querySelector('#prompts-load-more');
+  if (promptBody) {
+    promptBody.addEventListener('click', event => {
+      const row = event.target.closest('tr[data-i]');
+      if (!row) return;
+      openPrompt(row.dataset.i);
+      setSelectedPromptRow(promptBody, row.dataset.i);
+    });
+  }
+
+  if (loadMore) {
+    loadMore.addEventListener('click', async () => {
+      _page += 1;
+      const next = await api(withQuery('/api/prompts', {
+        limit: PAGE_SIZE,
+        offset: _page * PAGE_SIZE,
+        sort: sort.key,
+        provider: provider.key === 'all' ? null : provider.key,
+      }));
+      if (!next.length) {
+        loadMore.hidden = true;
+        return;
+      }
+      const empty = promptBody?.querySelector('#prompts-empty');
+      if (empty) empty.remove();
+      const startIndex = rows.length;
+      rows.push(...next);
+      promptBody?.insertAdjacentHTML(
+        'beforeend',
+        next.map((row, idx) => promptRow(row, startIndex + idx, sort, provider)).join(''),
+      );
+      if (next.length < PAGE_SIZE) loadMore.hidden = true;
+    });
+  }
 
   if (selectedPrompt) {
     const index = rows.findIndex(r => r.user_uuid === selectedPrompt);
-    if (index >= 0) openPrompt(index);
+    if (index >= 0) {
+      openPrompt(index);
+      setSelectedPromptRow(promptBody, String(index));
+    }
   }
+}
+
+function promptRow(r, index, sort, provider) {
+  return `<tr class="provider-row ${fmt.providerClass(r.provider)}" data-i="${index}" data-prompt="${fmt.htmlSafe(r.user_uuid)}" style="cursor:pointer">
+    <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : promptCost(r)}</td>
+    <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
+    <td>${fmt.htmlSafe(fmt.short(r.why_expensive || '', 90))}</td>
+    <td>${providerBadge(r.provider)}</td>
+    <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
+    <td class="num">${fmt.int(r.billable_tokens)}</td>
+    <td class="num">${fmt.int(r.cache_read_tokens)}</td>
+    <td><a href="${sessionHref(r.session_id, provider)}" class="mono" onclick="event.stopPropagation()">${fmt.htmlSafe(fmt.sessionShort(r.session_id))}</a></td>
+  </tr>`;
+}
+
+function setSelectedPromptRow(body, index) {
+  if (!body) return;
+  body.querySelectorAll('tr.selected').forEach(row => row.classList.remove('selected'));
+  body.querySelector(`tr[data-i="${index}"]`)?.classList.add('selected');
 }
 
 function promptCost(r) {

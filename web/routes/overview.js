@@ -299,7 +299,7 @@ export default async function (root) {
   });
   root.querySelector('[data-scan-now]')?.addEventListener('click', async event => {
     event.currentTarget.textContent = 'Scanning...';
-    await api('/api/scan');
+    await api('/api/scan', { method: 'POST' });
     window.dispatchEvent(new Event('hashchange'));
   });
   root.querySelector('#save-weekly-budget')?.addEventListener('click', () => {
@@ -567,14 +567,6 @@ function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks
         <span class="muted">${partial ? 'Data coverage is partial; remaining usage may be optimistic.' : `Current week: ${fmt.ts(weekWindow.start.toISOString())} to reset.`}</span>
       </div>
     </div>`;
-}
-
-function weeklyLimitWarning(status, remainingTokens) {
-  if (!status || status.pct == null) return '';
-  if (status.cls === 'exceeded') return 'Weekly limit exceeded. New usage will count beyond your configured allowance until reset.';
-  if (status.cls === 'near') return `${fmt.compact(remainingTokens)} tokens remain before this weekly limit is reached.`;
-  if (status.cls === 'caution') return 'Weekly usage is climbing. Keep an eye on large prompts, tool results, and long sessions.';
-  return '';
 }
 
 function trendKpi(label, value, sub = '', cls = '') {
