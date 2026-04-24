@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 
 from token_dashboard.db import init_db
@@ -135,6 +136,35 @@ class ServerTests(unittest.TestCase):
         self.assertIn("prompt_text", body)
         self.assertIn("small", body)
         self.assertIn("codex", body)
+
+    def test_project_sessions_json(self):
+        body = json.loads(self._get("/api/projects/p/sessions"))
+        self.assertIsInstance(body, list)
+        self.assertEqual([row["session_id"] for row in body], ["s"])
+        self.assertEqual(body[0]["project_slug"], "p")
+
+    def test_project_prompts_json(self):
+        body = json.loads(self._get("/api/projects/p2/prompts"))
+        self.assertIsInstance(body, list)
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["session_id"], "s2")
+        self.assertEqual(body[0]["provider"], "codex")
+        self.assertIn("estimated_cost_partial", body[0])
+        self.assertIn("why_expensive", body[0])
+
+    def test_project_sessions_rejects_bad_slug(self):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/projects/..%2F/sessions")
+            self.fail("expected HTTP error")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
+    def test_project_prompts_rejects_bad_slug(self):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/projects/has%20space/prompts")
+            self.fail("expected HTTP error")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
 
     def test_projects_json(self):
         body = json.loads(self._get("/api/projects"))

@@ -187,6 +187,7 @@ const ROUTES = {
   '/prompts':  () => import('/web/routes/prompts.js'),
   '/sessions': () => import('/web/routes/sessions.js'),
   '/projects': () => import('/web/routes/projects.js'),
+  '/projects/:slug': () => import('/web/routes/project-detail.js'),
   '/skills':   () => import('/web/routes/skills.js'),
   '/tips':     () => import('/web/routes/tips.js'),
   '/settings': () => import('/web/routes/settings.js'),
@@ -198,7 +199,7 @@ function buildTopbar() {
   wrap.innerHTML = `
     <div class="brand">Agent Dashboard</div>
     <nav>
-      ${Object.keys(ROUTES).map(p => `<a href="#${p}" data-route="${p}">${p.slice(1)}</a>`).join('')}
+      ${Object.keys(ROUTES).filter(p => !p.includes(':')).map(p => `<a href="#${p}" data-route="${p}">${p.slice(1)}</a>`).join('')}
     </nav>
     <div class="spacer"></div>
     <span class="pill" id="plan-pill">api</span>
@@ -216,7 +217,8 @@ async function render() {
   const path = hash.split('?')[0];
   let key = path;
   if (path.startsWith('/sessions/')) key = '/sessions';
-  setActiveTab(key);
+  if (path.startsWith('/projects/')) key = '/projects/:slug';
+  setActiveTab(key === '/projects/:slug' ? '/projects' : key);
   const loader = ROUTES[key] || ROUTES['/overview'];
   const mod = await loader();
   $('#app').innerHTML = '';
