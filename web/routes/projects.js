@@ -34,7 +34,7 @@ export default async function (root) {
         <tbody>
           ${rows.map(r => `
             <tr>
-              <td title="${fmt.htmlSafe(r.project_slug)}">${fmt.htmlSafe(r.project_name || r.project_slug)}</td>
+              <td title="${fmt.htmlSafe(r.project_slug)}"><a href="#/projects/${encodeURIComponent(r.project_slug)}">${fmt.htmlSafe(r.project_name || r.project_slug)}</a></td>
               <td class="num">${fmt.int(r.sessions)}</td>
               <td class="num">${fmt.int(r.turns)}</td>
               <td class="num">${fmt.int(r.billable_tokens)}</td>

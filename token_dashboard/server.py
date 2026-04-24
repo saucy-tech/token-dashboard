@@ -7,6 +7,7 @@ import io
 import json
 import mimetypes
 import queue
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -20,8 +21,11 @@ from .db import (
     daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
     ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
     current_session,
+    sessions_for_project, prompts_for_project,
     usage_limit_settings, set_usage_limit_settings,
 )
+
+SLUG_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
 from .scanner import data_source_status, scan_sources
@@ -165,6 +169,18 @@ def _billable_tokens(row: dict) -> int:
         + int(row.get("cache_create_5m_tokens") or 0)
         + int(row.get("cache_create_1h_tokens") or 0)
     )
+
+
+def _attach_prompt_costs(rows: list, pricing: dict) -> None:
+    for r in rows:
+        c = cost_for(r["model"], {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": r["cache_read_tokens"],
+            "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
+        }, pricing)
+        r["estimated_cost_usd"] = c["usd"]
+        r["estimated_cost_partial"] = c["usd"] is None
+        r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
 
 
 def _row_cost(model: str, row: dict, pricing: dict) -> dict:
@@ -403,15 +419,7 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 if name == "prompts":
                     sort = qs.get("sort", ["tokens"])[0]
                     rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
-                    for r in rows:
-                        c = cost_for(r["model"], {
-                            "input_tokens": 0, "output_tokens": 0,
-                            "cache_read_tokens": r["cache_read_tokens"],
-                            "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-                        }, pricing)
-                        r["estimated_cost_usd"] = c["usd"]
-                        r["estimated_cost_partial"] = c["usd"] is None
-                        r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
+                    _attach_prompt_costs(rows, pricing)
                     return _export_rows(self, rows, "prompts", fmt)
                 if name == "projects":
                     return _export_rows(
@@ -438,15 +446,26 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
                 sort = qs.get("sort", ["tokens"])[0]
                 rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
-                for r in rows:
-                    c = cost_for(r["model"], {
-                        "input_tokens": 0, "output_tokens": 0,
-                        "cache_read_tokens": r["cache_read_tokens"],
-                        "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-                    }, pricing)
-                    r["estimated_cost_usd"] = c["usd"]
-                    r["estimated_cost_partial"] = c["usd"] is None
-                    r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
+                _attach_prompt_costs(rows, pricing)
+                return _send_json(self, rows)
+            if path.startswith("/api/projects/") and path.endswith("/sessions"):
+                slug = path[len("/api/projects/"):-len("/sessions")]
+                if not SLUG_RE.match(slug):
+                    return _send_error(self, 400, "invalid project slug")
+                limit = _clamp_limit(qs.get("limit", ["20"])[0], 20)
+                return _send_json(self, sessions_for_project(
+                    db_path, slug, limit=limit, since=since, until=until,
+                ))
+            if path.startswith("/api/projects/") and path.endswith("/prompts"):
+                slug = path[len("/api/projects/"):-len("/prompts")]
+                if not SLUG_RE.match(slug):
+                    return _send_error(self, 400, "invalid project slug")
+                limit = _clamp_limit(qs.get("limit", ["10"])[0], 10)
+                sort = qs.get("sort", ["tokens"])[0]
+                rows = prompts_for_project(
+                    db_path, slug, limit=limit, sort=sort, since=since, until=until,
+                )
+                _attach_prompt_costs(rows, pricing)
                 return _send_json(self, rows)
             if path == "/api/projects":
                 return _send_json(self, project_summary(db_path, since, until, provider=provider))
