@@ -30,9 +30,20 @@ const TOOLTIP = {
   padding: [8, 12],
 };
 
+const _resizeHandlers = new WeakMap();
+
 function mount(el) {
+  const existing = echarts.getInstanceByDom(el);
+  if (existing) {
+    const oldHandler = _resizeHandlers.get(el);
+    if (oldHandler) window.removeEventListener('resize', oldHandler);
+    _resizeHandlers.delete(el);
+    existing.dispose();
+  }
   const c = echarts.init(el, null, { renderer: 'svg' });
-  window.addEventListener('resize', () => c.resize());
+  const handler = () => c.resize();
+  _resizeHandlers.set(el, handler);
+  window.addEventListener('resize', handler);
   return c;
 }
 
@@ -44,10 +55,17 @@ export function lineChart(el, { x, series }) {
     legend: { textStyle: { color: '#8B98A6' }, top: 0, right: 0, icon: 'roundRect', itemWidth: 8, itemHeight: 8 },
     xAxis: { ...X_AXIS, type: 'category', data: x, boundaryGap: false },
     yAxis: { ...Y_AXIS, type: 'value' },
-    series: series.map(s => ({
-      ...s, type: 'line', smooth: true, showSymbol: false,
-      areaStyle: { opacity: 0.12 }, lineStyle: { width: 2 },
-    })),
+    series: series.map(s => {
+      const color = s.color;
+      const rest = { ...s };
+      delete rest.color;
+      return {
+        ...rest, type: 'line', smooth: true, showSymbol: false,
+        itemStyle: color ? { color } : undefined,
+        areaStyle: { opacity: 0.12, color },
+        lineStyle: { width: 2, color },
+      };
+    }),
   });
   return c;
 }

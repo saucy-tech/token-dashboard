@@ -5,7 +5,9 @@ import unittest
 from token_dashboard.db import init_db, connect
 from token_dashboard.tips import (
     cache_discipline_tips, repeated_target_tips, right_size_tips,
-    outlier_tips, all_tips, dismiss_tip,
+    outlier_tips, expensive_pattern_tips, all_tips, dismiss_tip, doctor_edit_thrashing_tips,
+    doctor_error_loop_tips, doctor_exploration_tips, doctor_abandonment_tips,
+    doctor_behavior_tips, doctor_rapid_followup_tips,
 )
 
 
@@ -54,6 +56,7 @@ class RepeatTipTests(unittest.TestCase):
         cats = [t["category"] for t in tips]
         self.assertIn("repeat-file", cats)
         self.assertIn("repeat-bash", cats)
+        self.assertTrue(any(t.get("why") and t.get("links") for t in tips))
 
 
 class RightSizeTests(unittest.TestCase):
@@ -85,6 +88,123 @@ class OutlierTests(unittest.TestCase):
             c.commit()
         tips = outlier_tips(self.db, today_iso="2026-04-19T00:00:00")
         self.assertTrue(any(t["category"] == "tool-bloat" for t in tips))
+        self.assertTrue(any(t.get("why") and t.get("links") for t in tips))
+
+    def test_repeated_expensive_pattern_grouped(self):
+        with connect(self.db) as c:
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, provider, tool_name, target, result_tokens, timestamp, is_error) VALUES (?, ?, 'p','codex','exec_command','cat huge.log',30000,'2026-04-18T00:00:00Z',0)",
+                    (f"m{i}", f"s{i}"),
+                )
+            c.commit()
+        tips = expensive_pattern_tips(self.db, today_iso="2026-04-19T00:00:00")
+        tip = next(t for t in tips if t["category"] == "expensive-pattern")
+        self.assertEqual(tip["provider"], "codex")
+        self.assertIn("90,000", tip["title"])
+        self.assertTrue(tip["links"])
+
+
+class DoctorTipTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+
+    def test_edit_thrashing_flagged(self):
+        with connect(self.db) as c:
+            for i in range(5):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, timestamp, is_error) VALUES (?, 's','p','Edit','app.py','2026-04-18T00:00:00Z',0)",
+                    (f"m{i}",),
+                )
+            c.commit()
+        tips = doctor_edit_thrashing_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "edit-thrashing" and t.get("rule") for t in tips))
+
+    def test_error_loop_flagged(self):
+        with connect(self.db) as c:
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, timestamp, is_error) VALUES (?, 's','p','Bash','npm test','2026-04-18T00:00:00Z',1)",
+                    (f"m{i}",),
+                )
+            c.commit()
+        tips = doctor_error_loop_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "error-loop" for t in tips))
+
+    def test_excessive_exploration_flagged(self):
+        with connect(self.db) as c:
+            for i in range(20):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, timestamp, is_error) VALUES (?, 's','p','Read','file.py','2026-04-18T00:00:00Z',0)",
+                    (f"r{i}",),
+                )
+            c.execute("INSERT INTO tool_calls (message_uuid, session_id, project_slug, tool_name, target, timestamp, is_error) VALUES ('e', 's','p','Edit','file.py','2026-04-18T00:00:00Z',0)")
+            c.commit()
+        tips = doctor_exploration_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "excessive-exploration" for t in tips))
+
+    def test_codex_apply_patch_counts_as_edit_thrashing(self):
+        with connect(self.db) as c:
+            for i in range(5):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, provider, tool_name, target, timestamp, is_error) VALUES (?, 'codex:s','p','codex','apply_patch','app.py','2026-04-18T00:00:00Z',0)",
+                    (f"m{i}",),
+                )
+            c.commit()
+        tips = doctor_edit_thrashing_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "edit-thrashing" and t["provider"] == "codex" for t in tips))
+
+    def test_codex_exec_command_reads_count_toward_exploration(self):
+        with connect(self.db) as c:
+            for i in range(20):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, provider, tool_name, target, timestamp, is_error) VALUES (?, 'codex:s','p','codex','exec_command','rg token_dashboard','2026-04-18T00:00:00Z',0)",
+                    (f"r{i}",),
+                )
+            c.execute("INSERT INTO tool_calls (message_uuid, session_id, project_slug, provider, tool_name, target, timestamp, is_error) VALUES ('e', 'codex:s','p','codex','apply_patch','file.py','2026-04-18T00:00:00Z',0)")
+            c.commit()
+        tips = doctor_exploration_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "excessive-exploration" and t["provider"] == "codex" for t in tips))
+
+    def test_high_abandonment_rate_flagged(self):
+        with connect(self.db) as c:
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, prompt_text) VALUES (?, ?, 'p','user','2026-04-18T00:00:00Z','hi')",
+                    (f"u{i}", f"s{i}"),
+                )
+            c.commit()
+        tips = doctor_abandonment_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "high-abandonment-rate" for t in tips))
+
+    def test_behavioral_correction_tip_flagged(self):
+        prompts = ["please build it", "no do the other thing", "wrong file", "thanks"]
+        with connect(self.db) as c:
+            for i, prompt in enumerate(prompts):
+                c.execute(
+                    "INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, prompt_text) VALUES (?, 's','p','user',? ,?)",
+                    (f"u{i}", f"2026-04-18T00:00:0{i}Z", prompt),
+                )
+            c.commit()
+        tips = doctor_behavior_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "correction-heavy" for t in tips))
+
+    def test_rapid_followups_flagged(self):
+        with connect(self.db) as c:
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO messages (uuid, session_id, project_slug, type, timestamp) VALUES (?, 's','p','assistant',?)",
+                    (f"a{i}", f"2026-04-18T00:00:{i * 10:02d}Z"),
+                )
+                c.execute(
+                    "INSERT INTO messages (uuid, session_id, project_slug, type, timestamp, prompt_text) VALUES (?, 's','p','user',?,'wait')",
+                    (f"u{i}", f"2026-04-18T00:00:{i * 10 + 5:02d}Z"),
+                )
+            c.commit()
+        tips = doctor_rapid_followup_tips(self.db, today_iso="2026-04-19T00:00:00")
+        self.assertTrue(any(t["signal"] == "rapid-corrections" for t in tips))
 
 
 class DismissTests(unittest.TestCase):

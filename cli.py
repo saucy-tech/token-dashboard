@@ -6,9 +6,10 @@ import os
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from token_dashboard.db import init_db, default_db_path, overview_totals
-from token_dashboard.scanner import scan_all
+from token_dashboard.scanner import default_codex_home, scan_sources
 from token_dashboard.tips import all_tips
 
 
@@ -24,9 +25,10 @@ def _projects(args) -> str:
     )
 
 
-def _codex_projects() -> str | None:
-    raw = (os.environ.get("CODEX_PROJECTS_DIR") or "").strip()
-    return raw or None
+def _codex(args) -> Optional[str]:
+    if getattr(args, "no_codex", False):
+        return None
+    return args.codex_dir or str(default_codex_home())
 
 
 def _today_range():
@@ -39,7 +41,7 @@ def _today_range():
 def cmd_scan(args):
     db = _db_path(args)
     init_db(db)
-    n = scan_all(_projects(args), db, _codex_projects())
+    n = scan_sources(_projects(args), db, codex_home=_codex(args))
     print(f"Token Dashboard: scanned {n['files']} files, {n['messages']} messages, {n['tools']} tool calls")
 
 
@@ -79,22 +81,24 @@ def cmd_dashboard(args):
     db = _db_path(args)
     init_db(db)
     if not args.no_scan:
-        scan_all(_projects(args), db, _codex_projects())
+        scan_sources(_projects(args), db, codex_home=_codex(args))
     from token_dashboard.server import run
 
     host = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", "8080"))
+    port = args.port
     url = f"http://{host}:{port}/"
     if not args.no_open:
         webbrowser.open(url)
     print(f"Token Dashboard listening on {url}")
-    run(host, port, db, _projects(args), codex_projects_dir=_codex_projects())
+    run(host, port, db, _projects(args), codex_dir=_codex(args))
 
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", help="SQLite path (default ~/.claude/token-dashboard.db)")
     common.add_argument("--projects-dir", help="JSONL root (default ~/.claude/projects)")
+    common.add_argument("--codex-dir", help="Codex home/root (default ~/.codex or $CODEX_HOME)")
+    common.add_argument("--no-codex", action="store_true", help="Skip Codex session scanning")
 
     p = argparse.ArgumentParser(prog="token-dashboard", description="Local Claude Code usage dashboard", parents=[common])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -105,6 +109,7 @@ def main():
     d = sub.add_parser("dashboard", parents=[common])
     d.add_argument("--no-scan", action="store_true")
     d.add_argument("--no-open", action="store_true")
+    d.add_argument("--port", type=int, default=8080)
     d.set_defaults(func=cmd_dashboard)
     args = p.parse_args()
     args.func(args)

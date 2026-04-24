@@ -2,31 +2,52 @@
 from __future__ import annotations
 
 import http.server
+import csv
+import io
 import json
 import mimetypes
 import queue
+import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 from .db import (
-    overview_totals, expensive_prompts, project_summary,
+    overview_totals, expensive_prompts, recent_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
-    daily_token_breakdown, model_breakdown, skill_breakdown,
-    sources_snapshot, normalize_source_param,
+    daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
+    ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
+    current_session,
+    sessions_for_project, prompts_for_project,
+    usage_limit_settings, set_usage_limit_settings,
 )
+
+SLUG_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
-from .scanner import scan_all
+from .scanner import data_source_status, scan_sources
 from .skills import cached_catalog
 
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
-EVENTS: "queue.Queue[dict]" = queue.Queue()
+EVENTS: "queue.Queue[dict]" = queue.Queue(maxsize=200)
+
+
+def _enqueue(evt: dict) -> None:
+    """Drop the oldest event rather than blocking when the queue is full."""
+    try:
+        EVENTS.put_nowait(evt)
+    except queue.Full:
+        try:
+            EVENTS.get_nowait()
+        except queue.Empty:
+            pass
+        EVENTS.put_nowait(evt)
 
 MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
@@ -34,16 +55,53 @@ MAX_LIMIT = 1000
 
 def _send_json(handler, obj, status: int = 200) -> None:
     body = json.dumps(obj, default=str).encode("utf-8")
+    _send_bytes(handler, body, "application/json", status=status)
+
+
+def _send_bytes(handler, body: bytes, content_type: str, status: int = 200, filename: Optional[str] = None) -> None:
     handler.send_response(status)
-    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "no-store")
+    if filename:
+        handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
     handler.end_headers()
-    handler.wfile.write(body)
+    if handler.command != "HEAD":
+        handler.wfile.write(body)
 
 
 def _send_error(handler, status: int, msg: str) -> None:
     _send_json(handler, {"error": msg}, status=status)
+
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _session_freshness(session: Optional[dict], window_minutes: int) -> dict:
+    if not session:
+        return {
+            "active": False,
+            "stale": True,
+            "window_minutes": window_minutes,
+            "last_update": None,
+            "age_seconds": None,
+        }
+    ended = _parse_iso_utc(session.get("ended_at") or session.get("ended"))
+    age = None if ended is None else max(0, int((datetime.now(timezone.utc) - ended).total_seconds()))
+    active = age is not None and age <= max(1, int(window_minutes)) * 60
+    return {
+        "active": active,
+        "stale": not active,
+        "window_minutes": window_minutes,
+        "last_update": session.get("ended_at") or session.get("ended"),
+        "age_seconds": age,
+    }
 
 
 def _clamp_limit(raw, default: int) -> int:
@@ -52,6 +110,14 @@ def _clamp_limit(raw, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, min(v, MAX_LIMIT))
+
+
+def _clamp_offset(raw, default: int = 0) -> int:
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, v)
 
 
 def _serve_static(handler, rel: str) -> None:
@@ -66,13 +132,237 @@ def _serve_static(handler, rel: str) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", ctype or "application/octet-stream")
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
-    handler.wfile.write(body)
+    if handler.command != "HEAD":
+        handler.wfile.write(body)
 
 
-def build_handler(db_path: str, projects_dir: str, codex_projects_dir: Optional[str] = None):
+def _csv_bytes(rows) -> bytes:
+    rows = list(rows or [])
+    if rows:
+        fieldnames = list(rows[0].keys())
+    else:
+        fieldnames = []
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    if fieldnames:
+        writer.writeheader()
+        writer.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def _export_rows(handler, rows, filename_base: str, fmt: str) -> None:
+    if fmt == "json":
+        return _send_bytes(
+            handler,
+            json.dumps(rows, default=str, indent=2).encode("utf-8"),
+            "application/json",
+            filename=f"{filename_base}.json",
+        )
+    if fmt == "csv":
+        return _send_bytes(
+            handler,
+            _csv_bytes(rows),
+            "text/csv; charset=utf-8",
+            filename=f"{filename_base}.csv",
+        )
+    return _send_error(handler, 404, "unsupported export format")
+
+
+def _billable_tokens(row: dict) -> int:
+    return (
+        int(row.get("input_tokens") or 0)
+        + int(row.get("output_tokens") or 0)
+        + int(row.get("cache_create_5m_tokens") or 0)
+        + int(row.get("cache_create_1h_tokens") or 0)
+    )
+
+
+def _attach_prompt_costs(rows: list, pricing: dict) -> None:
+    for r in rows:
+        c = cost_for(r["model"], {
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": r["cache_read_tokens"],
+            "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
+        }, pricing)
+        r["estimated_cost_usd"] = c["usd"]
+        r["estimated_cost_partial"] = c["usd"] is None
+        r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
+
+
+def _row_cost(model: str, row: dict, pricing: dict) -> dict:
+    return cost_for(model, {
+        "input_tokens": int(row.get("input_tokens") or 0),
+        "output_tokens": int(row.get("output_tokens") or 0),
+        "cache_read_tokens": int(row.get("cache_read_tokens") or 0),
+        "cache_create_5m_tokens": int(row.get("cache_create_5m_tokens") or 0),
+        "cache_create_1h_tokens": int(row.get("cache_create_1h_tokens") or 0),
+    }, pricing)
+
+
+def _delta(current, previous) -> dict:
+    if current is None or previous is None:
+        return {"current": current, "previous": previous, "absolute": None, "pct": None}
+    absolute = current - previous
+    pct = None if previous == 0 else absolute / previous
+    return {"current": current, "previous": previous, "absolute": absolute, "pct": pct}
+
+
+def _add_model_costs(rollups: list, model_rows: list, pricing: dict) -> None:
+    by_week = {}
+    for row in model_rows:
+        priced = _row_cost(row["dimension_key"], row, pricing)
+        bucket = by_week.setdefault(row["start_date"], {
+            "cost_usd": 0.0,
+            "priced": 0,
+            "unpriced": 0,
+            "estimated": 0,
+        })
+        if priced["usd"] is None:
+            bucket["unpriced"] += 1
+        else:
+            bucket["cost_usd"] += priced["usd"]
+            bucket["priced"] += 1
+            if priced["estimated"]:
+                bucket["estimated"] += 1
+    for row in rollups:
+        cost = by_week.get(row["start_date"], {})
+        row["billable_tokens"] = _billable_tokens(row)
+        row["cost_usd"] = round(cost.get("cost_usd", 0.0), 4) if cost.get("priced") else None
+        row["cost_partial"] = bool(cost.get("unpriced"))
+        row["cost_estimated"] = bool(cost.get("estimated"))
+
+
+def _aggregate_rows(rows: list, pricing: dict, cost_model_from_key=None, limit: int = 8) -> list:
+    grouped = {}
+    for row in rows:
+        key = row["dimension_key"]
+        item = grouped.setdefault(key, {
+            "key": key,
+            "label": row["dimension_label"],
+            "sessions": 0,
+            "turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_create_5m_tokens": 0,
+            "cache_create_1h_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_partial": False,
+            "cost_estimated": False,
+            "priced": 0,
+        })
+        item["sessions"] += int(row["sessions"] or 0)
+        item["turns"] += int(row["turns"] or 0)
+        for col in (
+            "input_tokens", "output_tokens", "cache_read_tokens",
+            "cache_create_5m_tokens", "cache_create_1h_tokens",
+        ):
+            item[col] += int(row[col] or 0)
+        model = cost_model_from_key(key) if cost_model_from_key else key
+        priced = _row_cost(model, row, pricing)
+        if priced["usd"] is None:
+            item["cost_partial"] = True
+        else:
+            item["cost_usd"] += priced["usd"]
+            item["priced"] += 1
+            if priced["estimated"]:
+                item["cost_estimated"] = True
+    result = []
+    for item in grouped.values():
+        item["billable_tokens"] = _billable_tokens(item)
+        item["cost_usd"] = round(item["cost_usd"], 4) if item.pop("priced") else None
+        result.append(item)
+    result.sort(key=lambda r: (r["cost_usd"] is not None, r["cost_usd"] or 0, r["billable_tokens"]), reverse=True)
+    return result[:limit]
+
+
+def _series_rows(rows: list, rollups: list, limit: int = 6) -> list:
+    weeks = [r["start_date"] for r in rollups]
+    totals = {}
+    labels = {}
+    by_key_week = {}
+    for row in rows:
+        key = row["dimension_key"]
+        labels[key] = row["dimension_label"]
+        value = _billable_tokens(row)
+        totals[key] = totals.get(key, 0) + value
+        by_key_week.setdefault(key, {})[row["start_date"]] = value
+    top = sorted(totals, key=totals.get, reverse=True)[:limit]
+    return [
+        {
+            "key": key,
+            "label": labels.get(key, key),
+            "values": [by_key_week.get(key, {}).get(week, 0) for week in weeks],
+        }
+        for key in top
+    ]
+
+
+def _trends_payload(db_path: str, pricing: dict, provider: Optional[str], weeks: int, budget_raw) -> dict:
+    ensure_usage_snapshots(db_path)
+    rollups = snapshot_rollups(db_path, period="week", provider=provider, limit=weeks + 1)
+    visible = rollups[-weeks:] if len(rollups) > weeks else rollups
+    since_start = visible[0]["start_date"] if visible else None
+    model_rows = snapshot_dimension_rows(db_path, "model", "week", provider=provider, since_start=since_start)
+    project_rows = snapshot_dimension_rows(db_path, "project", "week", provider=provider, since_start=since_start)
+    project_model_rows = snapshot_dimension_rows(db_path, "project_model", "week", provider=provider, since_start=since_start)
+    provider_rows = snapshot_dimension_rows(db_path, "provider", "week", provider=None, since_start=since_start)
+
+    _add_model_costs(visible, model_rows, pricing)
+    current = visible[-1] if visible else {}
+    previous = visible[-2] if len(visible) > 1 else {}
+    budget_usd = None
+    try:
+        budget_usd = float(budget_raw) if budget_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        budget_usd = None
+    if budget_usd is not None and budget_usd <= 0:
+        budget_usd = None
+    budget = None
+    if budget_usd is not None:
+        current_cost = current.get("cost_usd")
+        pct = None if current_cost is None else current_cost / budget_usd
+        budget = {
+            "weekly_budget_usd": budget_usd,
+            "current_week_cost_usd": current_cost,
+            "pct": pct,
+            "status": "unknown" if pct is None else ("over" if pct >= 1 else ("near" if pct >= 0.8 else "ok")),
+        }
+
+    return {
+        "weeks": visible,
+        "deltas": {
+            "sessions": _delta(current.get("sessions"), previous.get("sessions")),
+            "turns": _delta(current.get("turns"), previous.get("turns")),
+            "billable_tokens": _delta(current.get("billable_tokens"), previous.get("billable_tokens")),
+            "cost_usd": _delta(current.get("cost_usd"), previous.get("cost_usd")),
+        },
+        "top_cost_drivers": _aggregate_rows(
+            project_model_rows,
+            pricing,
+            cost_model_from_key=lambda key: key.split("\t", 1)[1] if "\t" in key else key,
+            limit=8,
+        ),
+        "project_series": {
+            "weeks": [r["start_date"] for r in visible],
+            "series": _series_rows(project_rows, visible),
+        },
+        "model_series": {
+            "weeks": [r["start_date"] for r in visible],
+            "series": _series_rows(model_rows, visible),
+        },
+        "provider_series": {
+            "weeks": [r["start_date"] for r in visible],
+            "series": _series_rows(provider_rows, visible, limit=4),
+        },
+        "budget": budget,
+    }
+
+
+def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
     pricing = load_pricing(PRICING_JSON)
-    codex_dir = (codex_projects_dir or "").strip() or None
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -87,75 +377,167 @@ def build_handler(db_path: str, projects_dir: str, codex_projects_dir: Optional[
             path = url.path
             since = qs.get("since", [None])[0]
             until = qs.get("until", [None])[0]
-            source = normalize_source_param(qs.get("source", [None])[0])
+            provider = qs.get("provider", [None])[0]
+            if provider in ("", "all"):
+                provider = None
             if path in ("/", "/index.html"):
                 return _serve_static(self, "index.html")
             if path.startswith("/web/"):
                 return _serve_static(self, path[5:])
             if path == "/api/overview":
-                totals = overview_totals(db_path, since, until, source=source)
+                totals = overview_totals(db_path, since, until, provider=provider)
                 cost_usd = 0.0
-                for m in model_breakdown(db_path, since, until, source=source):
+                priced = 0
+                unpriced = 0
+                estimated = 0
+                for m in model_breakdown(db_path, since, until, provider=provider):
                     c = cost_for(m["model"], m, pricing)
                     if c["usd"] is not None:
                         cost_usd += c["usd"]
-                totals["cost_usd"] = round(cost_usd, 4)
+                        priced += 1
+                        if c["estimated"]:
+                            estimated += 1
+                    else:
+                        unpriced += 1
+                totals["cost_usd"] = round(cost_usd, 4) if priced else None
+                totals["cost_partial"] = unpriced > 0
+                totals["cost_estimated"] = estimated > 0
+                totals["unpriced_models"] = unpriced
+                totals["estimated_models"] = estimated
                 return _send_json(self, totals)
-            if path == "/api/sources":
+            if path == "/api/trends":
+                weeks = _clamp_limit(qs.get("weeks", ["12"])[0], 12)
+                weeks = min(weeks, 52)
                 return _send_json(
                     self,
-                    sources_snapshot(db_path, projects_dir, codex_dir or ""),
+                    _trends_payload(
+                        db_path,
+                        pricing,
+                        provider=provider,
+                        weeks=weeks,
+                        budget_raw=qs.get("budget_usd", [None])[0],
+                    ),
                 )
+            if path.startswith("/api/export/"):
+                target = path[len("/api/export/"):]
+                if "." not in target:
+                    return _send_error(self, 404, "unsupported export target")
+                name, fmt = target.rsplit(".", 1)
+                limit = _clamp_limit(qs.get("limit", ["100"])[0], 100)
+                if name == "prompts":
+                    sort = qs.get("sort", ["tokens"])[0]
+                    rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
+                    _attach_prompt_costs(rows, pricing)
+                    return _export_rows(self, rows, "prompts", fmt)
+                if name == "projects":
+                    return _export_rows(
+                        self,
+                        project_summary(db_path, since, until, provider=provider),
+                        "projects",
+                        fmt,
+                    )
+                if name == "sessions":
+                    return _export_rows(
+                        self,
+                        recent_sessions(
+                            db_path,
+                            limit=limit,
+                            since=since,
+                            until=until,
+                            provider=provider,
+                        ),
+                        "sessions",
+                        fmt,
+                    )
+                return _send_error(self, 404, "unsupported export target")
             if path == "/api/prompts":
                 limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
+                offset = _clamp_offset(qs.get("offset", ["0"])[0], 0)
                 sort = qs.get("sort", ["tokens"])[0]
-                rows = expensive_prompts(
-                    db_path, limit=limit, sort=sort, source=source,
+                rows = recent_prompts(
+                    db_path,
+                    limit=limit,
+                    sort=sort,
+                    provider=provider,
+                    offset=offset,
                 )
-                for r in rows:
-                    c = cost_for(r["model"], {
-                        "input_tokens": 0, "output_tokens": 0,
-                        "cache_read_tokens": r["cache_read_tokens"],
-                        "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-                    }, pricing)
-                    r["estimated_cost_usd"] = c["usd"]
+                _attach_prompt_costs(rows, pricing)
+                return _send_json(self, rows)
+            if path.startswith("/api/projects/") and path.endswith("/sessions"):
+                slug = path[len("/api/projects/"):-len("/sessions")]
+                if not SLUG_RE.match(slug):
+                    return _send_error(self, 400, "invalid project slug")
+                limit = _clamp_limit(qs.get("limit", ["20"])[0], 20)
+                return _send_json(self, sessions_for_project(
+                    db_path, slug, limit=limit, since=since, until=until,
+                ))
+            if path.startswith("/api/projects/") and path.endswith("/prompts"):
+                slug = path[len("/api/projects/"):-len("/prompts")]
+                if not SLUG_RE.match(slug):
+                    return _send_error(self, 400, "invalid project slug")
+                limit = _clamp_limit(qs.get("limit", ["10"])[0], 10)
+                sort = qs.get("sort", ["tokens"])[0]
+                rows = prompts_for_project(
+                    db_path, slug, limit=limit, sort=sort, since=since, until=until,
+                )
+                _attach_prompt_costs(rows, pricing)
                 return _send_json(self, rows)
             if path == "/api/projects":
-                return _send_json(self, project_summary(db_path, since, until, source=source))
+                return _send_json(self, project_summary(db_path, since, until, provider=provider))
             if path == "/api/tools":
-                return _send_json(self, tool_token_breakdown(db_path, since, until, source=source))
+                return _send_json(self, tool_token_breakdown(db_path, since, until, provider=provider))
             if path == "/api/sessions":
                 return _send_json(self, recent_sessions(
                     db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
-                    since=since, until=until,
-                    source=source,
+                    since=since, until=until, provider=provider,
+                    offset=_clamp_offset(qs.get("offset", ["0"])[0], 0),
                 ))
+            if path == "/api/current-session":
+                settings = usage_limit_settings(db_path)
+                window = settings.get("active_session_window_minutes", 20)
+                session = current_session(db_path, provider=provider)
+                return _send_json(self, {
+                    "session": session,
+                    "freshness": _session_freshness(session, window),
+                    "definition": {
+                        "starts": "first scanned record timestamp for the session_id",
+                        "ends": "latest scanned record timestamp; local logs do not expose an explicit close event",
+                        "current": "latest scanned session in the selected provider scope",
+                        "active": f"marked active only when the latest scanned update is within {window} minutes",
+                        "usage": "sum of token columns for all messages with the session_id",
+                    },
+                })
             if path == "/api/daily":
-                return _send_json(self, daily_token_breakdown(db_path, since, until, source=source))
+                return _send_json(self, daily_token_breakdown(db_path, since, until, provider=provider))
             if path == "/api/skills":
-                rows = skill_breakdown(db_path, since, until, source=source)
+                rows = skill_breakdown(db_path, since, until, provider=provider)
                 catalog = cached_catalog()
                 for r in rows:
                     info = catalog.get(r["skill"])
                     r["tokens_per_call"] = info["tokens"] if info else None
                 return _send_json(self, rows)
             if path == "/api/by-model":
-                rows = model_breakdown(db_path, since, until, source=source)
+                rows = model_breakdown(db_path, since, until, provider=provider)
                 for r in rows:
                     c = cost_for(r["model"], r, pricing)
                     r["cost_usd"] = c["usd"]
                     r["cost_estimated"] = c["estimated"]
                 return _send_json(self, rows)
+            if path == "/api/providers":
+                return _send_json(self, provider_breakdown(db_path, since, until, provider=provider))
+            if path == "/api/sources":
+                return _send_json(self, data_source_status(projects_dir, codex_dir, db_path))
             if path.startswith("/api/sessions/"):
                 sid = path.rsplit("/", 1)[1]
-                return _send_json(self, session_turns(db_path, sid, source=source))
+                return _send_json(self, session_turns(db_path, sid))
             if path == "/api/tips":
-                return _send_json(self, all_tips(db_path))
+                if provider not in (None, "claude", "codex"):
+                    return _send_error(self, 400, "invalid provider")
+                return _send_json(self, all_tips(db_path, provider=provider))
             if path == "/api/plan":
                 return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
-            if path == "/api/scan":
-                n = scan_all(projects_dir, db_path, codex_dir)
-                return _send_json(self, n)
+            if path == "/api/settings/usage-limits":
+                return _send_json(self, usage_limit_settings(db_path))
             if path == "/api/stream":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -196,30 +578,31 @@ def build_handler(db_path: str, projects_dir: str, codex_projects_dir: Optional[
             if url.path == "/api/tips/dismiss":
                 dismiss_tip(db_path, body.get("key", ""))
                 return _send_json(self, {"ok": True})
+            if url.path == "/api/settings/usage-limits":
+                settings = set_usage_limit_settings(db_path, body)
+                return _send_json(self, settings)
+            if url.path == "/api/scan":
+                n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
+                return _send_json(self, n)
             self.send_response(404)
             self.end_headers()
 
     return H
 
 
-def _scan_loop(
-    db_path: str, projects_dir: str, codex_dir: Optional[str], interval: float = 30.0,
-):
+def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None, interval: float = 30.0):
     while True:
         try:
-            n = scan_all(projects_dir, db_path, codex_dir)
+            n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
             if n["messages"] > 0:
-                EVENTS.put({"type": "scan", "n": n, "ts": time.time()})
+                _enqueue({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
-            EVENTS.put({"type": "error", "message": str(e)})
+            _enqueue({"type": "error", "message": str(e)})
         time.sleep(interval)
 
 
-def run(host: str, port: int, db_path: str, projects_dir: str, codex_projects_dir: Optional[str] = None):
-    codex = (codex_projects_dir or "").strip() or None
-    threading.Thread(
-        target=_scan_loop, args=(db_path, projects_dir, codex), daemon=True,
-    ).start()
-    H = build_handler(db_path, projects_dir, codex_projects_dir=codex)
+def run(host: str, port: int, db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
+    threading.Thread(target=_scan_loop, args=(db_path, projects_dir, codex_dir), daemon=True).start()
+    H = build_handler(db_path, projects_dir, codex_dir=codex_dir)
     httpd = http.server.ThreadingHTTPServer((host, port), H)
     httpd.serve_forever()

@@ -16,9 +16,17 @@ The Settings route lets you select your pricing plan, but the Overview cost numb
 
 If you use Claude's Cowork mode (server-side sessions, not local `claude` CLI), those sessions don't write JSONL to `~/.claude/projects/` and the dashboard can't see them.
 
+## Source status is cache-aware, not a cloud sync check
+
+The dashboard can tell whether the configured local folders exist, whether logs are present, and whether files have been scanned into the SQLite cache. It cannot prove that a provider's cloud-side history is complete. Missing, disabled, or unscanned sources mean the dashboard is showing a partial local view.
+
+## Usage limits are dashboard thresholds, not vendor quotas
+
+Session and weekly limits are stored in the local SQLite database and shown against scanned local logs. They do not come from Anthropic, OpenAI, or any subscription quota API. Weekly reset uses the browser's local calendar boundary and sends that window to the backend as ISO timestamps for filtering. The "latest scanned session" can be marked active with a freshness heuristic, but the dashboard still cannot prove that a vendor app currently has an open live session.
+
 ## Non-standard model names get tier-fallback pricing
 
-If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), cost is estimated from the tier substring (`opus` / `sonnet` / `haiku`) in the name. The UI marks these as `estimated: true`. If the model name contains none of those substrings, cost is reported as null.
+If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), Claude cost is estimated from the tier substring (`opus` / `sonnet` / `haiku`) in the name. Overview and model APIs mark these as estimated. Unknown Codex/OpenAI model names do not have a tier fallback yet, so their cost is reported as null.
 
 ## First scan can be slow
 

@@ -1,5 +1,27 @@
-import { api, fmt, state, readQuery } from '/web/app.js';
-import { barChart, donutChart, groupedBarChart, stackedBarChart } from '/web/charts.js';
+import {
+  api,
+  dataSourcePanel,
+  fmt,
+  optionalApi,
+  providerTabs,
+  providerBadge,
+  readHashParam,
+  readProvider,
+  state,
+  withQuery,
+  writeHashParams,
+} from '/web/app.js';
+import { barChart, donutChart, groupedBarChart, lineChart, stackedBarChart } from '/web/charts.js';
+import {
+  billableTokens,
+  currentWeekWindow,
+  limitForProvider,
+  loadUsageSettings,
+  progressPct,
+  sessionLimitSummary,
+  warningLabel,
+  weeklyLimitSummary,
+} from '/web/limits.js';
 
 const RANGES = [
   { key: '7d',  label: '7d',  days: 7 },
@@ -9,277 +31,608 @@ const RANGES = [
 ];
 
 function readRange() {
-  const k = readQuery('range', '');
+  const k = readHashParam('range');
   return RANGES.find(r => r.key === k) || RANGES[1];
 }
 
-function readSource() {
-  const s = readQuery('source', '').trim().toLowerCase();
-  if (s === 'claude' || s === 'codex') return s;
-  return '';
+function writeRange(key) {
+  writeHashParams({ range: key });
 }
 
-function writeOverviewRange(key) {
-  const params = new URLSearchParams();
-  params.set('range', key);
-  const src = readSource();
-  if (src) params.set('source', src);
-  location.hash = '#/overview?' + params.toString();
+function sinceIso(range) {
+  if (!range.days) return null;
+  return new Date(Date.now() - range.days * 86400 * 1000).toISOString();
 }
 
-function sinceIsoDays(days) {
-  return new Date(Date.now() - days * 86400000).toISOString();
+function writeProvider(key) {
+  writeHashParams({ provider: key === 'all' ? null : key });
 }
 
-function localTodayBounds() {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { since: start.toISOString(), until: end.toISOString() };
+function queryParams(since, provider) {
+  return {
+    since,
+    provider: provider.key === 'all' ? null : provider.key,
+  };
 }
 
-function withParams(path, { since, until, source, limit } = {}) {
-  const q = [];
-  if (since) q.push('since=' + encodeURIComponent(since));
-  if (until) q.push('until=' + encodeURIComponent(until));
-  if (source) q.push('source=' + encodeURIComponent(source));
-  if (limit != null && limit !== '') q.push('limit=' + encodeURIComponent(String(limit)));
-  if (!q.length) return path;
-  return path + (path.includes('?') ? '&' : '?') + q.join('&');
+function sessionsHref(provider) {
+  return provider.key === 'all'
+    ? '#/sessions'
+    : '#/sessions?provider=' + encodeURIComponent(provider.key);
 }
 
-function cacheCreate(totals) {
-  return (totals.cache_create_5m_tokens || 0) + (totals.cache_create_1h_tokens || 0);
-}
-
-function kpiRow(totals, planHtml) {
-  const cc = cacheCreate(totals);
-  const k = (label, compactVal, fullVal, cls = '') => `
-    <div class="card kpi ${cls}">
-      <div class="label">${label}</div>
-      <div class="value" title="${fullVal}">${compactVal}</div>
-    </div>`;
-  return `
-    <div class="row cols-7">
-      ${k('Sessions', fmt.int(totals.sessions), fmt.int(totals.sessions))}
-      ${k('Turns', fmt.int(totals.turns), fmt.int(totals.turns))}
-      ${k('Input', fmt.compact(totals.input_tokens), fmt.int(totals.input_tokens) + ' tokens')}
-      ${k('Output', fmt.compact(totals.output_tokens), fmt.int(totals.output_tokens) + ' tokens')}
-      ${k('Cache read', fmt.compact(totals.cache_read_tokens), fmt.int(totals.cache_read_tokens) + ' tokens')}
-      ${k('Cache create', fmt.compact(cc), fmt.int(cc) + ' tokens')}
-      <div class="card kpi cost">
-        <div class="label">Est. cost</div>
-        <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
-        ${planHtml}
-      </div>
-    </div>`;
-}
-
-function planSubtitle() {
-  if (!state.pricing || state.plan === 'api') return '';
-  const p = state.pricing.plans[state.plan];
-  if (!p || !p.monthly) return '';
-  return `<div class="sub">pay $${p.monthly}/mo on ${fmt.htmlSafe(p.label)}</div>`;
-}
-
-function sourceBadge(src) {
-  if (!src) return '';
-  const label = src === 'claude' ? 'Claude Code' : 'Codex';
-  return `<span class="pill" style="margin-left:8px">${fmt.htmlSafe(label)}</span>`;
+function sessionHref(sessionId, provider) {
+  return '#/sessions/' + encodeURIComponent(sessionId) + (
+    provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
+  );
 }
 
 export default async function (root) {
   const range = readRange();
-  const src = readSource();
-  const srcParam = src || undefined;
-  const sinceCharts = range.days ? sinceIsoDays(range.days) : null;
+  const provider = readProvider();
+  const since = sinceIso(range);
+  const params = queryParams(since, provider);
+  const weeklyBudget = readWeeklyBudget();
+  const usageSettings = await loadUsageSettings(api);
+  const usageLimits = limitForProvider(usageSettings, provider.key);
+  const weekWindow = currentWeekWindow(new Date(), usageLimits.weekStartDay);
+  const weekParams = {
+    since: weekWindow.start.toISOString(),
+    until: weekWindow.reset.toISOString(),
+    provider: provider.key === 'all' ? null : provider.key,
+  };
 
-  const today = localTodayBounds();
-  const sinceWeek = sinceIsoDays(7);
+  const [totals, currentWeek, trends, projects, sessions, currentSession, tools, daily, byModel, providers, sources] = await Promise.all([
+    api(withQuery('/api/overview', params)),
+    api(withQuery('/api/overview', weekParams)),
+    api(withQuery('/api/trends', {
+      provider: provider.key === 'all' ? null : provider.key,
+      weeks: 12,
+      budget_usd: weeklyBudget,
+    })),
+    api(withQuery('/api/projects', params)),
+    api(withQuery('/api/sessions', { ...params, limit: 10 })),
+    api(withQuery('/api/current-session', {
+      provider: provider.key === 'all' ? null : provider.key,
+    })),
+    api(withQuery('/api/tools', params)),
+    api(withQuery('/api/daily', params)),
+    api(withQuery('/api/by-model', params)),
+    api(withQuery('/api/providers', params)),
+    optionalApi('/api/sources', { sources: [] }),
+  ]);
 
-  const fetches = [
-    api(withParams('/api/overview', { since: sinceWeek, source: srcParam })),
-    api(withParams('/api/overview', { since: today.since, until: today.until, source: srcParam })),
-    api(withParams('/api/sessions', { source: srcParam, limit: 1 })),
-    api(withParams('/api/projects', { since: sinceCharts, source: srcParam })),
-    api(withParams('/api/sessions', { since: sinceCharts, source: srcParam, limit: 10 })),
-    api(withParams('/api/tools', { since: sinceCharts, source: srcParam })),
-    api(withParams('/api/daily', { since: sinceCharts, source: srcParam })),
-    api(withParams('/api/by-model', { since: sinceCharts, source: srcParam })),
-  ];
+  const cacheCreate =
+    (totals.cache_create_5m_tokens || 0) +
+    (totals.cache_create_1h_tokens || 0);
 
-  const [
-    totalsWeek,
-    totalsToday,
-    latestList,
-    projects,
-    sessions,
-    tools,
-    daily,
-    byModel,
-  ] = await Promise.all(fetches);
-
-  const latest = (latestList && latestList[0]) || null;
-  const srcQs = src ? `?source=${encodeURIComponent(src)}` : '';
-  const latestLink = latest
-    ? `#/sessions/${encodeURIComponent(latest.session_id)}${srcQs}`
-    : '#/sessions' + (src ? `?source=${encodeURIComponent(src)}` : '');
-
-  const rangeTabs = `
-    <div class="range-tabs" role="tablist" title="Applies to charts inside “Exploratory analytics”">
-      ${RANGES.map(r => `<button type="button" data-range="${r.key}" class="${r.key === range.key ? 'active' : ''}">${r.label}</button>`).join('')}
+  const kpi = (label, compactVal, fullVal, cls = '') => `
+    <div class="card kpi ${cls}">
+      <div class="label">${label}</div>
+      <div class="value" title="${fullVal}">${compactVal}</div>
     </div>`;
 
+  const providerCards = providers.map(p => {
+    const billable =
+      (p.input_tokens || 0) +
+      (p.output_tokens || 0) +
+      (p.cache_create_5m_tokens || 0) +
+      (p.cache_create_1h_tokens || 0);
+    return `
+      <div class="card provider-surface ${fmt.providerClass(p.provider)}">
+        <h3 style="display:flex;align-items:center">
+          <span>${fmt.htmlSafe(fmt.providerLabel(p.provider))}</span>
+          <span class="spacer"></span>
+          ${providerBadge(p.provider, { short: true })}
+        </h3>
+        <div class="flex muted" style="font-family:var(--mono);font-size:12px;justify-content:space-between">
+          <span>${fmt.int(p.sessions)} sessions</span>
+          <span>${fmt.int(p.turns)} turns</span>
+        </div>
+        <div style="margin-top:10px;font-family:var(--mono);font-size:22px;letter-spacing:-0.03em">${fmt.compact(billable)}</div>
+        <div class="muted" style="margin-top:4px;font-size:12px">billable tokens</div>
+      </div>`;
+  }).join('');
+
+  const costSub = costSubtitle(totals);
+  const trendWeeks = trends.weeks || [];
+  const latestWeek = trendWeeks[trendWeeks.length - 1] || {};
+  const budget = trends.budget;
+  const rangeTabs = `
+    <div class="range-tabs" role="tablist">
+      ${RANGES.map(r => `<button data-range="${r.key}" class="${r.key === range.key ? 'active' : ''}">${r.label}</button>`).join('')}
+    </div>`;
+  const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
+
   root.innerHTML = `
-    <div class="flex" style="margin-bottom:14px;flex-wrap:wrap;gap:10px;align-items:center">
+    <div class="flex" style="margin-bottom:14px">
       <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Overview</h2>
-      ${sourceBadge(src)}
-      <span class="muted" style="font-size:12px">primary: this week · today · latest session</span>
+      <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'} · ${fmt.htmlSafe(selectedProvider)}</span>
       <div class="spacer"></div>
-      <span class="muted" style="font-size:11px">chart range</span>
       ${rangeTabs}
     </div>
 
-    <section class="overview-section card" style="margin-bottom:14px">
-      <h3 class="overview-h3">This week</h3>
-      <p class="muted" style="margin:-4px 0 12px;font-size:12px">Rolling last 7 days (not tied to the chart range below).</p>
-      ${kpiRow(totalsWeek, planSubtitle())}
-    </section>
+    <div class="flex" style="margin:-4px 0 16px;justify-content:flex-end">
+      ${providerTabs(provider.key)}
+    </div>
 
-    <section class="overview-section card" style="margin-bottom:14px">
-      <h3 class="overview-h3">Today</h3>
-      <p class="muted" style="margin:-4px 0 12px;font-size:12px">Local calendar day (${fmt.ts(today.since).slice(0, 10)}).</p>
-      ${kpiRow(totalsToday, '')}
-    </section>
+    <div style="margin-bottom:16px">
+      ${dataSourcePanel(sources, { scanButton: true })}
+    </div>
 
-    <section class="overview-section card" style="margin-bottom:14px">
-      <h3 class="overview-h3">Latest scanned session</h3>
-      <p class="muted" style="margin:-4px 0 10px;font-size:12px">Most recently active session in the database.</p>
-      ${latest ? `
-        <table class="latest-session-table">
-          <thead><tr><th>started</th><th>project</th><th class="num">turns</th><th class="num">tokens</th><th></th></tr></thead>
-          <tbody>
-            <tr>
-              <td class="mono">${fmt.ts(latest.started)}</td>
-              <td>${fmt.htmlSafe(latest.project_name || latest.project_slug)}</td>
-              <td class="num">${fmt.int(latest.turns)}</td>
-              <td class="num">${fmt.compact(latest.tokens)}</td>
-              <td><a href="${latestLink}">Open →</a></td>
-            </tr>
-          </tbody>
-        </table>` : `<p class="muted">No sessions yet.</p>`}
-    </section>
-
-    <details class="card charts-details" id="ov-charts-details" style="margin-bottom:14px">
-      <summary><strong>Exploratory analytics</strong><span class="muted" style="font-weight:400;font-size:12px;margin-left:8px">— daily trends, projects, models, tools, recent sessions (${range.days ? `last ${range.days}d` : 'all time'})</span></summary>
-      <div style="margin-top:16px">
-        <div class="row cols-2" style="margin-top:0">
-          <div class="card flat-nested">
-            <h3>Your daily work</h3>
-            <p class="muted" style="margin:-4px 0 10px;font-size:12px">Billable stack: input, output, cache create.</p>
-            <div id="ch-daily-billable" style="height:260px"></div>
-          </div>
-          <div class="card flat-nested">
-            <h3>Daily cache reads</h3>
-            <p class="muted" style="margin:-4px 0 10px;font-size:12px">Cheap re-use of prior context.</p>
-            <div id="ch-daily-cache" style="height:260px"></div>
-          </div>
-        </div>
-        <div class="row cols-2" style="margin-top:16px">
-          <div class="card flat-nested"><h3>Tokens by project</h3><div id="ch-projects" style="height:320px"></div></div>
-          <div class="card flat-nested">
-            <h3>Token usage by model</h3>
-            <p class="muted" style="margin:-4px 0 4px;font-size:12px">Share of billable tokens per model.</p>
-            <div id="ch-model" style="height:300px"></div>
-          </div>
-        </div>
-        <div class="row cols-2" style="margin-top:16px">
-          <div class="card flat-nested"><h3>Top tools (by call count)</h3><div id="ch-tools" style="height:320px"></div></div>
-          <div class="card flat-nested">
-            <h3 style="display:flex;align-items:center"><span>Recent sessions</span><span class="spacer"></span><a href="#/sessions${src ? `?source=${encodeURIComponent(src)}` : ''}" style="font-weight:400;font-size:12px">all →</a></h3>
-            <table>
-              <thead><tr><th>started</th><th>project</th><th class="num">tokens</th></tr></thead>
-              <tbody>
-                ${sessions.map(s => `
-                  <tr>
-                    <td class="mono">${fmt.ts(s.started)}</td>
-                    <td><a href="#/sessions/${encodeURIComponent(s.session_id)}${srcQs}">${fmt.htmlSafe(s.project_name || s.project_slug)}</a></td>
-                    <td class="num">${fmt.compact(s.tokens)}</td>
-                  </tr>`).join('') || '<tr><td colspan="3" class="muted">no sessions in this range</td></tr>'}
-              </tbody>
-            </table>
-          </div>
-        </div>
+    <div class="row cols-7">
+      ${kpi('Sessions',     fmt.int(totals.sessions),       fmt.int(totals.sessions))}
+      ${kpi('Turns',        fmt.int(totals.turns),          fmt.int(totals.turns))}
+      ${kpi('Input',        fmt.compact(totals.input_tokens),       fmt.int(totals.input_tokens) + ' tokens')}
+      ${kpi('Output',       fmt.compact(totals.output_tokens),      fmt.int(totals.output_tokens) + ' tokens')}
+      ${kpi('Cache read',   fmt.compact(totals.cache_read_tokens),  fmt.int(totals.cache_read_tokens) + ' tokens')}
+      ${kpi('Cache create', fmt.compact(cacheCreate),               fmt.int(cacheCreate) + ' tokens')}
+      <div class="card kpi cost">
+        <div class="label">API-equiv. cost</div>
+        <div class="value" title="${fmt.usd(totals.cost_usd)}">${fmt.usd(totals.cost_usd)}</div>
+        ${costSub}
       </div>
-    </details>
+    </div>
 
-    <details class="card glossary">
-      <summary><h3 style="display:inline-block;margin:0">What do these numbers mean?</h3><span class="muted" style="font-size:12px"> — click to expand</span></summary>
+    ${usageLimitsSection({
+      latestSession: currentSession.session ? { ...currentSession.session, _freshness: currentSession.freshness } : null,
+      currentWeek,
+      weekWindow,
+      trendWeeks,
+      budget,
+      limits: usageLimits,
+      provider,
+      sources,
+    })}
+
+    <div class="overview-section-head">
+      <h3>Trends</h3>
+      <div class="trend-budget">
+        <label for="weekly-budget">Weekly budget</label>
+        <input id="weekly-budget" type="number" min="0" step="1" inputmode="decimal" value="${weeklyBudget ?? ''}" placeholder="—">
+        <button class="ghost" id="save-weekly-budget">Save</button>
+      </div>
+    </div>
+
+    <div class="row cols-4">
+      ${trendKpi('Current week', latestWeek.start_date || '—', latestWeek.end_date ? `through ${latestWeek.end_date}` : 'weekly rollup')}
+      ${trendKpi('Billable tokens', fmt.compact(latestWeek.billable_tokens), deltaText(trends.deltas?.billable_tokens), deltaClass(trends.deltas?.billable_tokens))}
+      ${trendKpi('API-equiv. cost', fmt.usd(latestWeek.cost_usd), deltaText(trends.deltas?.cost_usd, fmt.usd), deltaClass(trends.deltas?.cost_usd))}
+      ${budgetKpi(budget)}
+    </div>
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card">
+        <h3>Weekly rollups</h3>
+        <div id="ch-weekly-rollups" style="height:280px"></div>
+      </div>
+      <div class="card">
+        <h3>Top cost drivers</h3>
+        <table>
+          <thead><tr><th>driver</th><th class="num">tokens</th><th class="num">cost</th></tr></thead>
+          <tbody>
+            ${driverRows(trends.top_cost_drivers || [])}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card">
+        <h3>Projects over time</h3>
+        <div id="ch-project-trends" style="height:300px"></div>
+      </div>
+      <div class="card">
+        <h3>Models over time</h3>
+        <div id="ch-model-trends" style="height:300px"></div>
+      </div>
+    </div>
+
+    <details class="card glossary" style="margin-top:16px">
+      <summary><h3 style="display:inline-block;margin:0">What do these numbers mean?</h3><span class="muted" style="font-size:12px">— click to expand</span></summary>
       <dl>
-        <dt>Session</dt><dd>One agent run; each session is a single <code>.jsonl</code> file.</dd>
-        <dt>Turn</dt><dd>One user message (each turn triggers a response, possibly with tool calls).</dd>
-        <dt>Input tokens</dt><dd>New text you (and tool results) sent this turn.</dd>
-        <dt>Output tokens</dt><dd>Text the model wrote back — often the main cost driver.</dd>
-        <dt>Cache read</dt><dd>Re-used context; billed much less than fresh input.</dd>
-        <dt>Cache create</dt><dd>One-time cost to write context into the cache.</dd>
-        <dt>Billable tokens</dt><dd>Input + output + cache create (reads billed separately).</dd>
+        <dt>Session</dt><dd>One run of a supported coding assistant, stored locally as a transcript or session log.</dd>
+        <dt>Turn</dt><dd>One message you sent to the assistant. Each turn triggers at least one model response and may include tool calls.</dd>
+        <dt>Input tokens</dt><dd>The new text you and your tool results sent to the model. Billed at the full input rate when pricing is available.</dd>
+        <dt>Output tokens</dt><dd>The text the assistant wrote back. This is usually the biggest cost driver per turn.</dd>
+        <dt>Cache read</dt><dd>Tokens re-used from cached context. High cache-read counts usually mean better context re-use and lower marginal cost.</dd>
+        <dt>Cache create</dt><dd>Writing something into the cache for the first time. One-time cost; pays off on the next turn.</dd>
+        <dt>Billable tokens</dt><dd>Input + Output + Cache create. Cache reads are billed separately (and much cheaper).</dd>
+        <dt>API-equivalent cost</dt><dd>Estimated from token rates in <code>pricing.json</code>. Subscription plans are shown as context, not added to this number.</dd>
+        <dt>Latest scanned session</dt><dd>The most recent locally scanned assistant session for the selected provider. It may be marked active only when its latest scanned update is recent.</dd>
+        <dt>Weekly limit</dt><dd>A dashboard-tracked threshold you set for this local data. It is not a guaranteed vendor quota.</dd>
+        <dt>Remaining usage</dt><dd>Your configured weekly limit minus the current local weekly total. Missing or unscanned sources can make this optimistic.</dd>
+        <dt>Reset time</dt><dd>The next configured local calendar-week boundary in your browser's time zone.</dd>
       </dl>
     </details>
+
+    ${providers.length ? `
+      <div class="row cols-3" style="margin-top:16px">
+        ${providerCards}
+      </div>` : ''}
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card">
+        <h3>Your daily work</h3>
+        <p class="muted" style="margin:-4px 0 10px;font-size:12px">Tokens you paid for: what you sent (<b>input</b>), what the assistant wrote (<b>output</b>), and what got stored for re-use (<b>cache create</b>).</p>
+        <div id="ch-daily-billable" style="height:260px"></div>
+      </div>
+      <div class="card">
+        <h3>Daily cache reads</h3>
+        <p class="muted" style="margin:-4px 0 10px;font-size:12px"><b>Cache reads</b> are cheap re-uses of things the model already saw. They usually cost far less than fresh input tokens.</p>
+        <div id="ch-daily-cache" style="height:260px"></div>
+      </div>
+    </div>
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card"><h3>Tokens by project</h3><div id="ch-projects" style="height:320px"></div></div>
+      <div class="card">
+        <h3>Token usage by model</h3>
+        <p class="muted" style="margin:-4px 0 4px;font-size:12px">Share of billable tokens per model in the current filtered view.</p>
+        <div id="ch-model" style="height:300px"></div>
+      </div>
+    </div>
+
+    <div class="row cols-2" style="margin-top:16px">
+      <div class="card"><h3>Top tools (by call count)</h3><div id="ch-tools" style="height:320px"></div></div>
+      <div class="card">
+        <h3 style="display:flex;align-items:center"><span>Recent sessions</span><span class="spacer"></span><a href="${sessionsHref(provider)}" style="font-weight:400;font-size:12px">all →</a></h3>
+        <table>
+          <thead><tr><th>started</th><th>project</th><th class="num">tokens</th></tr></thead>
+          <tbody>
+            ${sessions.map(s => `
+              <tr>
+                <td class="mono">${fmt.ts(s.started)}</td>
+                <td><a href="${sessionHref(s.session_id, provider)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</a></td>
+                <td class="num">${fmt.compact(s.tokens)}</td>
+              </tr>`).join('') || '<tr><td colspan="3" class="muted">no sessions in this range</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
   `;
 
+  // range buttons
   root.querySelectorAll('.range-tabs button').forEach(btn => {
-    btn.addEventListener('click', () => writeOverviewRange(btn.dataset.range));
+    if (btn.dataset.range) btn.addEventListener('click', () => writeRange(btn.dataset.range));
+    if (btn.dataset.provider) btn.addEventListener('click', () => writeProvider(btn.dataset.provider));
+  });
+  root.querySelector('[data-scan-now]')?.addEventListener('click', async event => {
+    event.currentTarget.textContent = 'Scanning...';
+    await api('/api/scan', { method: 'POST' });
+    window.dispatchEvent(new Event('hashchange'));
+  });
+  root.querySelector('#save-weekly-budget')?.addEventListener('click', () => {
+    const raw = root.querySelector('#weekly-budget')?.value || '';
+    const value = Number(raw);
+    if (!raw || !Number.isFinite(value) || value <= 0) {
+      localStorage.removeItem('td.weekly-budget-usd');
+    } else {
+      localStorage.setItem('td.weekly-budget-usd', String(value));
+    }
+    window.dispatchEvent(new Event('hashchange'));
   });
 
-  const chartsEl = root.querySelector('#ov-charts-details');
-  let chartsInited = false;
-
-  function mountCharts() {
-    if (chartsInited) return;
-    chartsInited = true;
-    stackedBarChart(document.getElementById('ch-daily-billable'), {
-      categories: daily.map(d => d.day),
-      series: [
-        { name: 'input',        values: daily.map(d => d.input_tokens),        color: '#4A9EFF' },
-        { name: 'output',       values: daily.map(d => d.output_tokens),       color: '#7C5CFF' },
-        { name: 'cache create', values: daily.map(d => d.cache_create_tokens), color: '#E8A23B' },
-      ],
-    });
-    stackedBarChart(document.getElementById('ch-daily-cache'), {
-      categories: daily.map(d => d.day),
-      series: [{ name: 'cache read', values: daily.map(d => d.cache_read_tokens), color: '#3FB68B' }],
-    });
-    donutChart(document.getElementById('ch-model'),
-      byModel.map(m => ({
-        name: fmt.modelShort(m.model) || 'unknown',
-        value: (m.input_tokens || 0) + (m.output_tokens || 0)
-             + (m.cache_create_5m_tokens || 0) + (m.cache_create_1h_tokens || 0),
-      })).filter(d => d.value > 0),
-    );
-    const topProjects = projects.slice(0, 8);
-    groupedBarChart(document.getElementById('ch-projects'), {
-      categories: topProjects.map(p => {
-        const name = p.project_name || p.project_slug;
-        return name.length > 20 ? name.slice(0, 19) + '…' : name;
-      }),
-      series: [
-        { name: 'input',  values: topProjects.map(p => p.input_tokens  || 0), color: '#4A9EFF' },
-        { name: 'output', values: topProjects.map(p => p.output_tokens || 0), color: '#7C5CFF' },
-      ],
-    });
-    const topTools = tools.slice(0, 8);
-    barChart(document.getElementById('ch-tools'), {
-      categories: topTools.map(t => t.tool_name),
-      values: topTools.map(t => t.calls),
-      color: '#7C5CFF',
-    });
-  }
-
-  if (chartsEl?.open) {
-    requestAnimationFrame(mountCharts);
-  }
-  chartsEl?.addEventListener('toggle', () => {
-    if (chartsEl.open) requestAnimationFrame(mountCharts);
+  lineChart(document.getElementById('ch-weekly-rollups'), {
+    x: trendWeeks.map(w => w.start_date),
+    series: [
+      { name: 'billable', data: trendWeeks.map(w => w.billable_tokens || 0), color: '#4A9EFF' },
+      { name: 'cache read', data: trendWeeks.map(w => w.cache_read_tokens || 0), color: '#3FB68B' },
+    ],
   });
+
+  lineChart(document.getElementById('ch-project-trends'), {
+    x: trends.project_series?.weeks || [],
+    series: (trends.project_series?.series || []).map((s, i) => ({
+      name: fmt.short(s.label, 22),
+      data: s.values,
+      color: ['#4A9EFF', '#7C5CFF', '#3FB68B', '#E8A23B', '#E5484D', '#5BCEDA'][i % 6],
+    })),
+  });
+
+  lineChart(document.getElementById('ch-model-trends'), {
+    x: trends.model_series?.weeks || [],
+    series: (trends.model_series?.series || []).map((s, i) => ({
+      name: fmt.modelShort(s.label),
+      data: s.values,
+      color: ['#7C5CFF', '#4A9EFF', '#3FB68B', '#E8A23B', '#E5484D', '#5BCEDA'][i % 6],
+    })),
+  });
+
+  // Your daily work — billable tokens (input + output + cache create)
+  stackedBarChart(document.getElementById('ch-daily-billable'), {
+    categories: daily.map(d => d.day),
+    series: [
+      { name: 'input',        values: daily.map(d => d.input_tokens),        color: '#4A9EFF' },
+      { name: 'output',       values: daily.map(d => d.output_tokens),       color: '#7C5CFF' },
+      { name: 'cache create', values: daily.map(d => d.cache_create_tokens), color: '#E8A23B' },
+    ],
+  });
+
+  // Daily cache reads (separate — scale is 100× larger)
+  stackedBarChart(document.getElementById('ch-daily-cache'), {
+    categories: daily.map(d => d.day),
+    series: [
+      { name: 'cache read', values: daily.map(d => d.cache_read_tokens), color: '#3FB68B' },
+    ],
+  });
+
+  // by-model doughnut
+  donutChart(document.getElementById('ch-model'),
+    byModel.map(m => ({
+      name: fmt.modelShort(m.model) || 'unknown',
+      value: (m.input_tokens || 0) + (m.output_tokens || 0)
+           + (m.cache_create_5m_tokens || 0) + (m.cache_create_1h_tokens || 0),
+    })).filter(d => d.value > 0),
+  );
+
+  // tokens by project — input vs output
+  const topProjects = projects.slice(0, 8);
+  groupedBarChart(document.getElementById('ch-projects'), {
+    categories: topProjects.map(p => {
+      const name = p.project_name || p.project_slug;
+      return name.length > 20 ? name.slice(0, 19) + '…' : name;
+    }),
+    series: [
+      { name: 'input',  values: topProjects.map(p => p.input_tokens  || 0), color: '#4A9EFF' },
+      { name: 'output', values: topProjects.map(p => p.output_tokens || 0), color: '#7C5CFF' },
+    ],
+  });
+
+  // top tools
+  const topTools = tools.slice(0, 8);
+  barChart(document.getElementById('ch-tools'), {
+    categories: topTools.map(t => t.tool_name),
+    values: topTools.map(t => t.calls),
+    color: '#7C5CFF',
+  });
+}
+
+function readWeeklyBudget() {
+  const raw = localStorage.getItem('td.weekly-budget-usd');
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function formatReset(reset) {
+  return reset.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function usageProgressRow({ label, used, limit, status, meta, emptyText }) {
+  const pct = progressPct(status);
+  const value = limit ? `${fmt.compact(used)} / ${fmt.compact(limit)}` : fmt.compact(used);
+  const sub = limit ? `${status.label} · ${fmt.int(used)} of ${fmt.int(limit)} tokens` : emptyText;
+  return `
+    <div class="limit-progress-row ${status.cls}">
+      <div class="limit-progress-main">
+        <div>
+          <div class="limit-label">
+            <span>${fmt.htmlSafe(label)}</span>
+            ${limit ? `<span class="limit-state">${fmt.htmlSafe(status.name)}</span>` : ''}
+          </div>
+          <div class="limit-value" title="${fmt.htmlSafe(limit ? `${fmt.int(used)} of ${fmt.int(limit)} tokens` : `${fmt.int(used)} tokens`)}">${fmt.htmlSafe(value)}</div>
+        </div>
+        <div class="limit-meta">${fmt.htmlSafe(meta)}</div>
+      </div>
+      <div class="limit-meter" aria-label="${fmt.htmlSafe(label)} progress">
+        <span style="width:${pct}%"></span>
+      </div>
+      <div class="limit-sub">${fmt.htmlSafe(sub)}</div>
+    </div>`;
+}
+
+function usageMetric(label, value, sub = '', cls = '') {
+  return `
+    <div class="limit-metric ${cls}">
+      <div class="label">${fmt.htmlSafe(label)}</div>
+      <div class="value" title="${fmt.htmlSafe(String(value ?? '—'))}">${fmt.htmlSafe(String(value ?? '—'))}</div>
+      ${sub ? `<div class="sub">${fmt.htmlSafe(sub)}</div>` : ''}
+    </div>`;
+}
+
+function weeklyHistorySummary(trendWeeks, currentWeek, limits) {
+  const rows = [...(trendWeeks || [])];
+  const currentStart = currentWeek?.start_date;
+  const currentIdx = rows.findIndex(w => w.start_date === currentStart);
+  if (currentIdx >= 0) rows[currentIdx] = { ...rows[currentIdx], ...currentWeek };
+  else if (currentWeek?.start_date) rows.push(currentWeek);
+  const visible = rows.slice(-5);
+  if (!visible.length) return '';
+  const values = visible.map(w => billableTokens(w));
+  const max = Math.max(...values, limits.weeklyTokens || 0, 1);
+  const current = values[values.length - 1] || 0;
+  const previous = values.length > 1 ? values[values.length - 2] : null;
+  const delta = previous == null ? null : current - previous;
+  const deltaTextValue = delta == null
+    ? 'no prior week'
+    : `${delta >= 0 ? '+' : ''}${fmt.compact(delta)} vs previous week`;
+  const deltaClassValue = delta == null || delta === 0 ? '' : (delta > 0 ? 'near' : 'normal');
+  return `
+    <div class="limit-history">
+      <div class="limit-history-head">
+        <span>Weekly history</span>
+        <span class="${deltaClassValue}">${fmt.htmlSafe(deltaTextValue)}</span>
+      </div>
+      <div class="limit-history-bars">
+        ${visible.map((week, i) => {
+          const value = values[i] || 0;
+          const pct = Math.max(2, Math.round((value / max) * 100));
+          const isCurrent = i === visible.length - 1;
+          return `
+            <div class="limit-history-bar ${isCurrent ? 'current' : ''}" title="${fmt.htmlSafe(`${week.start_date}: ${fmt.int(value)} tokens`)}">
+              <span style="height:${pct}%"></span>
+              <em>${fmt.htmlSafe(shortWeekLabel(week.start_date))}</em>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function shortWeekLabel(dateStr) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return dateStr.slice(5);
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks, budget, limits, provider, sources }) {
+  const sessionSummary = sessionLimitSummary(latestSession, limits);
+  const currentTokens = sessionSummary.used;
+  const currentStatus = sessionSummary.status;
+  const weeklySummary = weeklyLimitSummary(currentWeek, limits);
+  const weeklyTokens = weeklySummary.used;
+  const weeklyStatus = weeklySummary.status;
+  const remainingTokens = weeklySummary.remaining;
+  const sessionHref = latestSession ? (
+    '#/sessions/' + encodeURIComponent(latestSession.session_id) + (
+      provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
+    )
+  ) : '#/sessions';
+  const sourceRows = sources.sources || [];
+  const partial = sourceRows.some(s => !['ready', 'disabled'].includes(s.data_state || ''));
+  const lastScan = Math.max(0, ...sourceRows.map(s => Number(s.last_scan_at || 0)));
+  const lastScanLabel = lastScan ? new Date(lastScan * 1000).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  }) : 'not scanned';
+  const reset = formatReset(weekWindow.reset);
+  const weeklyCost = budget
+    ? `${fmt.usd(budget.current_week_cost_usd)} of ${fmt.usd(budget.weekly_budget_usd)}`
+    : 'cost budget not set';
+  const sessionMeta = latestSession
+    ? `${fmt.providerLabel(latestSession.provider)} · started ${fmt.ts(latestSession.started_at || latestSession.started)}`
+    : 'no scanned session';
+  const weekMeta = `${fmt.ts(weekWindow.start.toISOString())} to ${reset}`;
+  const weeklyUsedLabel = limits.weeklyTokens ? `${progressPct(weeklyStatus)}%` : '—';
+  const remainingLabel = remainingTokens == null ? '—' : fmt.compact(remainingTokens);
+  const warningText = warningLabel(weeklyStatus, remainingTokens == null ? null : fmt.compact(remainingTokens), 'Weekly');
+  const freshness = latestSession?._freshness || {};
+  const latestLabel = freshness.active ? 'Latest scanned session (active)' : 'Latest scanned session';
+  const staleText = freshness.stale && latestSession
+    ? `Latest session may be stale; last scanned update ${fmt.ts(freshness.last_update)}.`
+    : '';
+  return `
+    <div class="card usage-limits">
+      <div class="usage-limits-head">
+        <div>
+          <h3>Usage limits</h3>
+          <p class="muted">Dashboard thresholds for the selected provider scope. Usage is measured from scanned session logs, not vendor quota APIs.</p>
+        </div>
+        <a href="#/settings" class="button-link">Configure</a>
+      </div>
+
+      <div class="limit-panel">
+        ${usageProgressRow({
+          label: latestLabel,
+          used: currentTokens,
+          limit: limits.sessionTokens,
+          status: currentStatus,
+          meta: sessionMeta,
+          emptyText: limits.sessionTokens ? 'no scanned session usage yet' : 'set a session token threshold',
+        })}
+        ${usageProgressRow({
+          label: 'Current week',
+          used: weeklyTokens,
+          limit: limits.weeklyTokens,
+          status: weeklyStatus,
+          meta: weekMeta,
+          emptyText: limits.weeklyEnabled ? weeklyCost : 'weekly limit disabled',
+        })}
+      </div>
+
+      <div class="limit-metrics">
+        ${usageMetric('Weekly used', weeklyUsedLabel, limits.weeklyTokens ? `${fmt.compact(weeklyTokens)} consumed` : (limits.weeklyEnabled ? 'set weekly token limit' : 'limit disabled'), weeklyStatus.cls)}
+        ${usageMetric('Remaining', remainingLabel, remainingTokens == null ? (limits.weeklyEnabled ? 'weekly limit not set' : 'limit disabled') : 'tokens available', remainingTokens === 0 && limits.weeklyTokens ? 'exceeded' : 'normal')}
+        ${usageMetric('Reset', reset, 'local time')}
+        ${usageMetric('Last scan', lastScanLabel, partial ? 'partial source coverage' : 'source status current', partial ? 'caution' : 'normal')}
+      </div>
+
+      ${warningText ? `<div class="limit-warning ${weeklyStatus.cls}">${fmt.htmlSafe(warningText)}</div>` : ''}
+      ${partial ? `<div class="limit-warning coverage">Data coverage may be incomplete, so remaining usage can be optimistic.</div>` : ''}
+      ${staleText ? `<div class="limit-warning stale">${fmt.htmlSafe(staleText)}</div>` : ''}
+
+      ${weeklyHistorySummary(trendWeeks, {
+        ...currentWeek,
+        start_date: weekWindow.start.toISOString().slice(0, 10),
+      }, limits)}
+
+      <div class="usage-limits-foot">
+        <a href="${sessionHref}">${latestSession ? 'Open latest scanned session' : 'View sessions'}</a>
+        <span class="muted">${partial ? 'Data coverage is partial; remaining usage may be optimistic.' : `Current week: ${fmt.ts(weekWindow.start.toISOString())} to reset.`}</span>
+      </div>
+    </div>`;
+}
+
+function trendKpi(label, value, sub = '', cls = '') {
+  return `
+    <div class="card kpi trend-kpi">
+      <div class="label">${fmt.htmlSafe(label)}</div>
+      <div class="value" title="${fmt.htmlSafe(String(value ?? '—'))}">${fmt.htmlSafe(String(value ?? '—'))}</div>
+      ${sub ? `<div class="delta ${cls}">${fmt.htmlSafe(sub)}</div>` : ''}
+    </div>`;
+}
+
+function budgetKpi(budget) {
+  if (!budget) {
+    return trendKpi('Budget', '—', 'no threshold set');
+  }
+  const pct = budget.pct == null ? '—' : Math.round(budget.pct * 100) + '%';
+  const cls = budget.status === 'over' ? 'down' : (budget.status === 'near' ? 'warn' : 'up');
+  return trendKpi('Budget', pct, `${fmt.usd(budget.current_week_cost_usd)} of ${fmt.usd(budget.weekly_budget_usd)}`, cls);
+}
+
+function deltaClass(delta) {
+  if (!delta || delta.absolute == null || delta.absolute === 0) return '';
+  return delta.absolute > 0 ? 'up' : 'down';
+}
+
+function deltaText(delta, formatter = fmt.compact) {
+  if (!delta || delta.absolute == null) return 'no previous week';
+  const abs = delta.absolute || 0;
+  const sign = abs > 0 ? '+' : '';
+  const pct = delta.pct == null ? '' : ` (${sign}${Math.round(delta.pct * 100)}%)`;
+  return `${sign}${formatter(abs)} vs prev${pct}`;
+}
+
+function driverRows(rows) {
+  if (!rows.length) return '<tr><td colspan="3" class="muted">no weekly snapshot data yet</td></tr>';
+  return rows.map(row => `
+    <tr>
+      <td>${fmt.htmlSafe(row.label || row.key)}</td>
+      <td class="num">${fmt.compact(row.billable_tokens)}</td>
+      <td class="num">${fmt.usd(row.cost_usd)}${row.cost_partial ? '<span class="muted">*</span>' : ''}</td>
+    </tr>`).join('');
+}
+
+function costSubtitle(totals) {
+  const notes = [];
+  if (totals.cost_usd == null) {
+    notes.push((totals.sessions || 0) ? 'missing pricing for all models' : 'no model usage in range');
+  } else {
+    notes.push('token-rate estimate');
+  }
+  if (totals.cost_partial) {
+    const n = totals.unpriced_models || 0;
+    notes.push(`partial: ${n} unpriced model${n === 1 ? '' : 's'}`);
+  }
+  if (totals.cost_estimated) {
+    const n = totals.estimated_models || 0;
+    notes.push(`tier-estimated: ${n} model${n === 1 ? '' : 's'}`);
+  }
+  const plan = planSubtitle();
+  if (plan) notes.push(plan);
+  return `<div class="sub">${notes.map(fmt.htmlSafe).join(' · ')}</div>`;
+}
+
+function planSubtitle() {
+  if (!state.pricing || state.plan === 'api') return null;
+  const p = state.pricing.plans[state.plan];
+  if (!p || !p.monthly) return null;
+  return `${p.label}: $${p.monthly}/mo subscription not included`;
 }

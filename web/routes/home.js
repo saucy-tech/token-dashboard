@@ -1,16 +1,15 @@
-import { api, fmt, state, readQuery } from '/web/app.js';
+import {
+  api,
+  dataSourcePanel,
+  fmt,
+  optionalApi,
+  readHashParam,
+  state,
+  withQuery,
+} from '/web/app.js';
 
 function sinceIsoDays(days) {
   return new Date(Date.now() - days * 86400000).toISOString();
-}
-
-function withApiParams(path, params) {
-  const q = [];
-  if (params.since) q.push('since=' + encodeURIComponent(params.since));
-  if (params.until) q.push('until=' + encodeURIComponent(params.until));
-  if (params.source) q.push('source=' + encodeURIComponent(params.source));
-  if (!q.length) return path;
-  return path + (path.includes('?') ? '&' : '?') + q.join('&');
 }
 
 function cacheCreate(t) {
@@ -47,27 +46,27 @@ function planSubtitle() {
   return `<div class="sub">pay $${p.monthly}/mo on ${fmt.htmlSafe(p.label)}</div>`;
 }
 
-function columnCard(meta, totals, emptyMsg) {
-  const src = meta.id;
-  const detail = `#/overview?source=${encodeURIComponent(src)}`;
-  const sessions = `#/sessions?source=${encodeURIComponent(src)}`;
-  const configured = meta.configured !== false;
-  const reachable = meta.reachable;
-  const rows = meta.message_rows || 0;
+function columnCard(sourceObj, totals, emptyMsg) {
+  const src = sourceObj.provider || 'claude';
+  const detail = `#/overview?provider=${encodeURIComponent(src)}`;
+  const sessions = `#/sessions?provider=${encodeURIComponent(src)}`;
+  const label = sourceObj.label || src;
+  const rows = sourceObj.cached_messages ?? 0;
+  const connected = sourceObj.status === 'connected';
 
   let banner = '';
-  if (src === 'codex' && !configured) {
-    banner = '<p class="home-col-banner muted">Set <code class="mono">CODEX_PROJECTS_DIR</code> to your Codex JSONL root, then rescan. Same format as Claude Code sessions.</p>';
-  } else if (!reachable && configured) {
-    banner = `<p class="home-col-banner warn">Projects directory not found: <code class="mono">${fmt.htmlSafe(meta.projects_dir)}</code></p>`;
-  } else if (rows === 0 && reachable) {
+  if (src === 'codex' && sourceObj.status === 'disabled') {
+    banner = `<p class="home-col-banner muted">${fmt.htmlSafe(sourceObj.hint || 'Enable Codex in CLI or set a Codex home, then rescan.')}</p>`;
+  } else if (sourceObj.status === 'missing') {
+    banner = `<p class="home-col-banner warn">${fmt.htmlSafe(sourceObj.hint || 'Path not found.')}</p>`;
+  } else if (rows === 0 && connected) {
     banner = `<p class="home-col-banner muted">${emptyMsg}</p>`;
   }
 
   return `
-    <section class="card home-col" data-source="${src}">
+    <section class="card home-col" data-provider="${fmt.htmlSafe(src)}">
       <div class="home-col-head">
-        <h2 style="margin:0;font-size:15px">${fmt.htmlSafe(meta.label)}</h2>
+        <h2 style="margin:0;font-size:15px">${fmt.htmlSafe(label)}</h2>
         <div class="spacer"></div>
         <a href="${detail}" class="small-link">Full overview →</a>
         <a href="${sessions}" class="small-link">Sessions →</a>
@@ -79,33 +78,17 @@ function columnCard(meta, totals, emptyMsg) {
 }
 
 export default async function (root) {
-  const tab = readQuery('tab', 'split');
+  const tab = readHashParam('tab', 'split') || 'split';
   const since7 = sinceIsoDays(7);
   const [meta, claudeT, codexT] = await Promise.all([
-    api('/api/sources'),
-    api(withApiParams('/api/overview', { since: since7, source: 'claude' })),
-    api(withApiParams('/api/overview', { since: since7, source: 'codex' })),
+    optionalApi('/api/sources', { sources: [] }),
+    api(withQuery('/api/overview', { since: since7, provider: 'claude' })),
+    api(withQuery('/api/overview', { since: since7, provider: 'codex' })),
   ]);
-  const claudeMeta = meta.sources.find(s => s.id === 'claude') || {};
-  const codexMeta = meta.sources.find(s => s.id === 'codex') || {};
+  const claudeMeta = meta.sources.find(s => s.provider === 'claude') || { provider: 'claude', label: 'Claude Code' };
+  const codexMeta = meta.sources.find(s => s.provider === 'codex') || { provider: 'codex', label: 'Codex' };
 
-  const sourcesStrip = `
-    <div class="card sources-strip" style="margin-bottom:16px">
-      <h3 style="margin:0 0 8px;font-size:13px">Data sources</h3>
-      <ul class="sources-strip-list">
-        ${meta.sources.map(s => {
-          const ok = s.reachable && (s.id === 'claude' || s.configured);
-          const st = !s.configured && s.id === 'codex' ? 'not configured'
-            : !s.reachable ? 'path missing'
-            : `${fmt.int(s.message_rows)} rows`;
-          return `<li><span class="dot ${ok ? 'ok' : 'bad'}"></span><strong>${fmt.htmlSafe(s.label)}</strong>
-            <span class="muted"> — ${fmt.htmlSafe(st)}</span>
-            ${s.projects_dir ? `<div class="mono muted" style="font-size:11px;margin-top:2px">${fmt.htmlSafe(s.projects_dir)}</div>` : ''}
-          </li>`;
-        }).join('')}
-      </ul>
-      <p class="muted" style="margin:10px 0 0;font-size:11px">Configure Codex via environment variable; full paths also appear in Settings.</p>
-    </div>`;
+  const sourcesStrip = dataSourcePanel(meta, { compact: true });
 
   const tabs = `
     <div class="home-tabs" role="tablist">
@@ -117,7 +100,7 @@ export default async function (root) {
   const splitBody = `
     <div class="row cols-2 home-split">
       ${columnCard(claudeMeta, claudeT, 'No Claude sessions in range yet. Run Claude Code in this profile.')}
-      ${columnCard(codexMeta, codexT, 'No Codex rows ingested yet. Point CODEX_PROJECTS_DIR at transcripts and wait for scan.')}
+      ${columnCard(codexMeta, codexT, 'No Codex rows ingested yet. Scan a Codex log root and wait for refresh.')}
     </div>`;
 
   const single = (id, totals, m) => `
@@ -141,9 +124,10 @@ export default async function (root) {
   root.querySelectorAll('.home-tabs button').forEach(btn => {
     btn.addEventListener('click', () => {
       const t = btn.dataset.tab;
-      const u = new URLSearchParams();
-      if (t !== 'split') u.set('tab', t);
-      const q = u.toString();
+      const params = new URLSearchParams(location.hash.split('?')[1] || '');
+      if (t === 'split') params.delete('tab');
+      else params.set('tab', t);
+      const q = params.toString();
       location.hash = '#/home' + (q ? '?' + q : '');
     });
   });
