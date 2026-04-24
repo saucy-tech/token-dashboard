@@ -4,11 +4,41 @@ import {
   exportHref,
   fmt,
   providerTabs,
+  readHashParam,
   readProvider,
   withQuery,
   writeHashParams,
 } from '/web/app.js';
 import { limitForProvider, loadUsageSettings, sessionLimitSummary } from '/web/limits.js';
+
+const RANGES = [
+  { key: '7d', label: '7d', days: 7 },
+  { key: '30d', label: '30d', days: 30 },
+  { key: '90d', label: '90d', days: 90 },
+  { key: 'all', label: 'All', days: null },
+];
+const PAGE_SIZE = 50;
+let _page = 0;
+let _rangeScopeKey = '';
+
+function readRange() {
+  const key = readHashParam('range');
+  return RANGES.find(range => range.key === key) || RANGES[1];
+}
+
+function writeRange(key) {
+  writeHashParams({ range: key });
+}
+
+function sinceIso(range) {
+  if (!range.days) return null;
+  return new Date(Date.now() - range.days * 86400 * 1000).toISOString();
+}
+
+function untilIso(range) {
+  if (!range.days) return null;
+  return new Date().toISOString();
+}
 
 export default async function (root) {
   const id = decodeURIComponent(currentHashPath().split('/')[2] || '');
@@ -18,13 +48,40 @@ export default async function (root) {
 
 async function renderList(root) {
   const provider = readProvider();
+  const range = readRange();
+  const since = sinceIso(range);
+  const until = untilIso(range);
+  const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
+  const scopeKey = `${provider.key}|${range.key}`;
+  if (scopeKey !== _rangeScopeKey) {
+    _rangeScopeKey = scopeKey;
+    _page = 0;
+  }
   const exportParams = {
-    limit: 100,
+    limit: 1000,
+    since,
+    until,
     provider: provider.key === 'all' ? null : provider.key,
   };
-  const list = await api(withQuery('/api/sessions', exportParams));
-  const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
+  const list = await api(withQuery('/api/sessions', {
+    limit: PAGE_SIZE,
+    offset: 0,
+    since,
+    until,
+    provider: provider.key === 'all' ? null : provider.key,
+  }));
+  const hasMoreInitial = list.length === PAGE_SIZE;
+  const rangeTabs = `
+    <div class="range-tabs" role="tablist">
+      ${RANGES.map(r => `<button data-range="${r.key}" class="${r.key === range.key ? 'active' : ''}">${r.label}</button>`).join('')}
+    </div>`;
   root.innerHTML = `
+    <div class="flex" style="margin-bottom:14px">
+      <h2 style="margin:0;font-size:16px;letter-spacing:-0.01em">Sessions</h2>
+      <span class="muted" style="font-size:12px">${range.days ? `last ${range.days} days` : 'all time'} · ${fmt.htmlSafe(selectedProvider)}</span>
+      <div class="spacer"></div>
+      ${rangeTabs}
+    </div>
     <div class="card">
       <h2>Sessions</h2>
       <div class="flex" style="margin:-8px 0 12px;align-items:flex-start">
@@ -40,19 +97,13 @@ async function renderList(root) {
       </div>
       <table>
         <thead><tr><th>started</th><th>project</th><th>provider</th><th class="num">turns</th><th class="num">tokens</th><th>session</th></tr></thead>
-        <tbody>
-          ${list.map(s => `
-            <tr>
-              <td class="mono">${fmt.ts(s.started)}</td>
-              <td title="${fmt.htmlSafe(s.project_slug)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</td>
-              <td><span class="badge ${fmt.providerClass(s.provider)}">${fmt.htmlSafe(fmt.providerLabel(s.provider))}</span></td>
-              <td class="num">${fmt.int(s.turns)}</td>
-              <td class="num">${fmt.int(s.tokens)}</td>
-              <td><a href="${sessionHref(s.session_id, provider)}" class="mono">${fmt.htmlSafe(fmt.sessionShort(s.session_id))}</a></td>
-            </tr>`).join('')}
-          ${list.length ? '' : '<tr><td colspan="6" class="muted">no sessions for this provider yet</td></tr>'}
+        <tbody id="sessions-body">
+          ${list.length ? list.map(s => sessionRow(s, provider)).join('') : '<tr id="sessions-empty"><td colspan="6" class="muted">no sessions for this provider and range yet</td></tr>'}
         </tbody>
       </table>
+      <div style="margin-top:12px">
+        <button class="ghost" id="sessions-load-more" ${hasMoreInitial ? '' : 'hidden'}>Load 50 more</button>
+      </div>
     </div>`;
 
   root.querySelectorAll('.provider-tabs button').forEach(btn => {
@@ -60,6 +111,42 @@ async function renderList(root) {
       writeHashParams({ provider: btn.dataset.provider === 'all' ? null : btn.dataset.provider });
     });
   });
+  root.querySelectorAll('.range-tabs button').forEach(btn => {
+    btn.addEventListener('click', () => writeRange(btn.dataset.range));
+  });
+
+  const body = root.querySelector('#sessions-body');
+  const loadMore = root.querySelector('#sessions-load-more');
+  if (!body || !loadMore) return;
+  loadMore.addEventListener('click', async () => {
+    _page += 1;
+    const next = await api(withQuery('/api/sessions', {
+      limit: PAGE_SIZE,
+      offset: _page * PAGE_SIZE,
+      since,
+      until,
+      provider: provider.key === 'all' ? null : provider.key,
+    }));
+    if (!next.length) {
+      loadMore.hidden = true;
+      return;
+    }
+    const empty = body.querySelector('#sessions-empty');
+    if (empty) empty.remove();
+    body.insertAdjacentHTML('beforeend', next.map(s => sessionRow(s, provider)).join(''));
+    if (next.length < PAGE_SIZE) loadMore.hidden = true;
+  });
+}
+
+function sessionRow(s, provider) {
+  return `<tr>
+    <td class="mono">${fmt.ts(s.started)}</td>
+    <td title="${fmt.htmlSafe(s.project_slug)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</td>
+    <td><span class="badge ${fmt.providerClass(s.provider)}">${fmt.htmlSafe(fmt.providerLabel(s.provider))}</span></td>
+    <td class="num">${fmt.int(s.turns)}</td>
+    <td class="num">${fmt.int(s.tokens)}</td>
+    <td><a href="${sessionHref(s.session_id, provider)}" class="mono">${fmt.htmlSafe(fmt.sessionShort(s.session_id))}</a></td>
+  </tr>`;
 }
 
 async function renderSession(root, id) {

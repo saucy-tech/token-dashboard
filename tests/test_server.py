@@ -56,6 +56,14 @@ class ServerTests(unittest.TestCase):
         )
         return urllib.request.urlopen(req).read()
 
+    def _post(self, path):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=b"",
+            method="POST",
+        )
+        return urllib.request.urlopen(req).read()
+
     def test_index_html(self):
         body = self._get("/")
         self.assertIn(b"Agent Dashboard", body)
@@ -72,6 +80,17 @@ class ServerTests(unittest.TestCase):
         body = json.loads(self._get("/api/overview?provider=codex"))
         self.assertEqual(body["sessions"], 1)
         self.assertEqual(body["turns"], 1)
+
+    def test_tips_json_can_filter_provider(self):
+        body = json.loads(self._get("/api/tips?provider=codex"))
+        self.assertIsInstance(body, list)
+
+    def test_tips_json_rejects_invalid_provider(self):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/tips?provider=warp")
+            self.fail("expected HTTP error")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
 
     def test_overview_week_boundary_excludes_reset_instant(self):
         body = json.loads(self._get(
@@ -131,6 +150,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(body), 1)
         self.assertEqual(body[0]["provider"], "codex")
 
+    def test_prompts_json_supports_offset(self):
+        body = json.loads(self._get("/api/prompts?limit=1&sort=recent&offset=1"))
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["session_id"], "s")
+
+    def test_prompts_json_clamps_negative_offset(self):
+        body = json.loads(self._get("/api/prompts?limit=1&sort=recent&offset=-99"))
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["session_id"], "s2")
+
     def test_export_prompts_csv(self):
         body = self._get("/api/export/prompts.csv?limit=10&provider=codex").decode("utf-8")
         self.assertIn("prompt_text", body)
@@ -170,6 +199,16 @@ class ServerTests(unittest.TestCase):
         body = json.loads(self._get("/api/projects"))
         self.assertIsInstance(body, list)
         self.assertEqual({row["project_slug"] for row in body}, {"p", "p2"})
+
+    def test_sessions_json_supports_offset(self):
+        body = json.loads(self._get("/api/sessions?limit=1&offset=1"))
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["session_id"], "s")
+
+    def test_sessions_json_clamps_negative_offset(self):
+        body = json.loads(self._get("/api/sessions?limit=1&offset=-12"))
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["session_id"], "s2")
 
     def test_projects_json_can_filter_provider(self):
         body = json.loads(self._get("/api/projects?provider=claude"))
@@ -255,6 +294,16 @@ class ServerTests(unittest.TestCase):
         with urllib.request.urlopen(req) as resp:
             self.assertEqual(resp.status, 200)
             self.assertEqual(resp.read(), b"")
+
+    def test_scan_requires_post(self):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/scan")
+            self.fail("expected HTTP error")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+        body = json.loads(self._post("/api/scan"))
+        self.assertIn("messages", body)
 
 
 if __name__ == "__main__":

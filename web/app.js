@@ -57,7 +57,6 @@ export const PROVIDER_OPTIONS = [
   { key: 'all', label: 'All providers' },
   { key: 'claude', label: 'Claude' },
   { key: 'codex', label: 'Codex' },
-  { key: 'warp', label: 'Warp' },
 ];
 
 export function currentHashPath() {

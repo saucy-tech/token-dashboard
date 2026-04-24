@@ -228,6 +228,9 @@ def _migrate_add_tool_calls_provider(conn) -> None:
 def connect(path: Union[str, Path]):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
@@ -333,7 +336,13 @@ def overview_totals(db_path, since=None, until=None, provider: Optional[str] = N
         return dict(c.execute(sql, [*args, *prov_args]).fetchone())
 
 
-def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", provider: Optional[str] = None) -> list:
+def expensive_prompts(
+    db_path,
+    limit: int = 50,
+    sort: str = "tokens",
+    provider: Optional[str] = None,
+    offset: int = 0,
+) -> list:
     """User prompt joined with the immediately-following assistant turn's tokens.
 
     sort="tokens" (default) → largest billable first.
@@ -355,12 +364,30 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", provider: 
        WHERE u.type='user' AND u.prompt_text IS NOT NULL {prov}
        ORDER BY {order}
        LIMIT ?
+      OFFSET ?
     """
     with connect(db_path) as c:
-        rows = [dict(r) for r in c.execute(sql, [*prov_args, limit])]
+        rows = [dict(r) for r in c.execute(sql, [*prov_args, limit, offset])]
         for row in rows:
             _enrich_prompt_row(c, row)
         return rows
+
+
+def recent_prompts(
+    db_path,
+    limit: int = 50,
+    sort: str = "tokens",
+    provider: Optional[str] = None,
+    offset: int = 0,
+) -> list:
+    """Compatibility helper used by `/api/prompts`."""
+    return expensive_prompts(
+        db_path,
+        limit=limit,
+        sort=sort,
+        provider=provider,
+        offset=offset,
+    )
 
 
 def _enrich_prompt_row(conn, row: dict) -> None:
@@ -589,7 +616,14 @@ def _normalize_usage_limit_settings(raw: dict) -> dict:
     }
 
 
-def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: Optional[str] = None) -> list:
+def recent_sessions(
+    db_path,
+    limit: int = 20,
+    since=None,
+    until=None,
+    provider: Optional[str] = None,
+    offset: int = 0,
+) -> list:
     ensure_session_rollups(db_path)
     where, args = [], []
     if since:
@@ -611,9 +645,10 @@ def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: 
        WHERE 1=1 {rng}{prov}
        ORDER BY ended DESC
        LIMIT ?
+      OFFSET ?
     """
     with connect(db_path) as c:
-        rows = [dict(r) for r in c.execute(sql, [*args, *prov_args, limit])]
+        rows = [dict(r) for r in c.execute(sql, [*args, *prov_args, limit, offset])]
     return rows
 
 
