@@ -568,14 +568,6 @@ function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks
     </div>`;
 }
 
-function weeklyLimitWarning(status, remainingTokens) {
-  if (!status || status.pct == null) return '';
-  if (status.cls === 'exceeded') return 'Weekly limit exceeded. New usage will count beyond your configured allowance until reset.';
-  if (status.cls === 'near') return `${fmt.compact(remainingTokens)} tokens remain before this weekly limit is reached.`;
-  if (status.cls === 'caution') return 'Weekly usage is climbing. Keep an eye on large prompts, tool results, and long sessions.';
-  return '';
-}
-
 function trendKpi(label, value, sub = '', cls = '') {
   return `
     <div class="card kpi trend-kpi">
