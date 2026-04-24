@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { billableTokens, currentWeekWindow, limitStatus, progressPct } from '../../web/limits.js';
+import {
+  billableTokens,
+  currentWeekWindow,
+  limitForProvider,
+  limitStatus,
+  progressPct,
+  sessionLimitSummary,
+  weeklyLimitSummary,
+} from '../../web/limits.js';
 
 assert.equal(billableTokens(null), 0);
 assert.equal(billableTokens({ input_tokens: 10, output_tokens: 20, cache_create_5m_tokens: 3, cache_create_1h_tokens: 7 }), 40);
@@ -53,3 +61,38 @@ assert.equal(window.weekStartDay, 1);
 
 window = currentWeekWindow(new Date('2026-04-22T12:00:00'), null);
 assert.equal(window.weekStartDay, 1);
+
+const settings = {
+  session_tokens: 1000,
+  weekly_tokens: 10000,
+  weekly_enabled: true,
+  caution_pct: 70,
+  near_pct: 90,
+  providers: {
+    claude: { session_tokens: 2000, weekly_tokens: 20000 },
+    codex: { session_tokens: null, weekly_tokens: 5000 },
+  },
+};
+
+let limits = limitForProvider(settings, 'all');
+assert.equal(limits.sessionTokens, 1000);
+assert.equal(limits.weeklyTokens, 10000);
+assert.equal(limits.providerOverride, false);
+
+limits = limitForProvider(settings, 'claude');
+assert.equal(limits.sessionTokens, 2000);
+assert.equal(limits.weeklyTokens, 20000);
+assert.equal(limits.providerOverride, true);
+
+limits = limitForProvider(settings, 'codex');
+assert.equal(limits.sessionTokens, 1000);
+assert.equal(limits.weeklyTokens, 5000);
+
+const session = sessionLimitSummary({ billable_tokens: 950 }, limits);
+assert.equal(session.status.cls, 'near');
+assert.equal(session.pct, 95);
+
+const week = weeklyLimitSummary({ input_tokens: 1000, output_tokens: 1500, cache_create_5m_tokens: 500 }, limits);
+assert.equal(week.used, 3000);
+assert.equal(week.remaining, 2000);
+assert.equal(week.status.cls, 'normal');

@@ -91,16 +91,16 @@ Change the port: `PORT=9000 python3 cli.py dashboard`.
 
 The dashboard is a single page with a hash-router tab bar across the top. Each tab is backed by its own JSON API under `/api/`:
 
-- **Overview** — all-time input/output/cache tokens, sessions, turns, provider summaries, API-equivalent estimated cost, weekly trend rollups with week-over-week deltas and optional budget thresholds, daily work and cache-read charts, project/model changes over time, top cost drivers, top tools by call count, and recent sessions. This is the landing tab.
+- **Overview** — all-time input/output/cache tokens, sessions, turns, provider summaries, API-equivalent estimated cost, latest scanned session, configurable session/weekly usage thresholds, weekly trend rollups with week-over-week deltas and optional budget thresholds, daily work and cache-read charts, project/model changes over time, top cost drivers, top tools by call count, and recent sessions. This is the landing tab.
 - **Comparison** — Claude vs. Codex deltas for sessions, turns, billable tokens, cache reads, daily usage, and model mix.
 - **Prompts** — your most expensive user prompts ranked by tokens. Click any row to see the assistant response, tool calls made, and the size of each tool result.
 - **Sessions** — turn-by-turn view of any single session, with per-turn tokens and tool calls.
 - **Projects** — per-project comparison: tokens, session counts, and which files were touched most.
 - **Skills** — which skills you invoke most often, and (where we can measure them) their token cost. See [limitations](docs/KNOWN_LIMITATIONS.md#skills-token-counts-are-partial).
 - **Tips** — rule-based suggestions for reducing token usage (repeated file reads, oversized tool results, low cache-hit rate, etc.).
-- **Settings** — select API / Pro / Max / Max-20x so cost figures show subscription context next to API-equivalent token estimates.
+- **Settings** — select API / Pro / Max / Max-20x so cost figures show subscription context next to API-equivalent token estimates, and configure global or provider-specific dashboard usage thresholds.
 
-The Overview tab also has a built-in "What do these numbers mean?" panel that explains input/output/cache tokens in plain English.
+The usage limits panel is dashboard-local accounting, not a vendor quota meter. Session limits apply to the latest scanned session, which is marked active only when the latest scanned update is inside the configured freshness window. Weekly limits use the browser's local reset boundary, saved in SQLite through `/api/settings/usage-limits`; older browser-only `localStorage` settings are migrated on first load. "All providers" uses the global limit, while Claude and Codex tabs use provider-specific overrides when configured.
 
 Warp is intentionally not a built-in source yet. The current MVP leaves room for a Warp add-on once a reliable local usage source is available.
 

@@ -46,6 +46,15 @@ class ServerTests(unittest.TestCase):
     def _get(self, path):
         return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}").read()
 
+    def _post_json(self, path, payload):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return urllib.request.urlopen(req).read()
+
     def test_index_html(self):
         body = self._get("/")
         self.assertIn(b"Agent Dashboard", body)
@@ -161,7 +170,41 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(body["session"]["session_id"], "s2")
         self.assertEqual(body["session"]["provider"], "codex")
         self.assertEqual(body["session"]["billable_tokens"], 5)
+        self.assertIn("freshness", body)
+        self.assertFalse(body["freshness"]["active"])
         self.assertIn("definition", body)
+
+    def test_usage_limit_settings_read_update_disable_and_validate(self):
+        body = json.loads(self._get("/api/settings/usage-limits"))
+        self.assertTrue(body["weekly_enabled"])
+        self.assertIsNone(body["session_tokens"])
+
+        saved = json.loads(self._post_json("/api/settings/usage-limits", {
+            "session_tokens": 128000,
+            "weekly_tokens": 1000000,
+            "weekly_enabled": False,
+            "week_start_day": 0,
+            "caution_pct": 98,
+            "near_pct": 80,
+            "active_session_window_minutes": 0,
+            "providers": {
+                "claude": {"session_tokens": 200000, "weekly_tokens": 2000000},
+                "codex": {"session_tokens": -1, "weekly_tokens": 500000},
+            },
+        }))
+
+        self.assertEqual(saved["session_tokens"], 128000)
+        self.assertEqual(saved["weekly_tokens"], 1000000)
+        self.assertFalse(saved["weekly_enabled"])
+        self.assertEqual(saved["week_start_day"], 0)
+        self.assertLess(saved["caution_pct"], saved["near_pct"])
+        self.assertEqual(saved["active_session_window_minutes"], 1)
+        self.assertEqual(saved["providers"]["claude"]["session_tokens"], 200000)
+        self.assertIsNone(saved["providers"]["codex"]["session_tokens"])
+        self.assertEqual(saved["providers"]["codex"]["weekly_tokens"], 500000)
+
+        reread = json.loads(self._get("/api/settings/usage-limits"))
+        self.assertEqual(reread, saved)
 
     def test_sources_json(self):
         body = json.loads(self._get("/api/sources"))

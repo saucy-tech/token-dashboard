@@ -1,15 +1,11 @@
 import { api, dataSourcePanel, optionalApi, state, $ } from '/web/app.js';
+import { loadUsageSettings, normalizeUsageSettings } from '/web/limits.js';
 
 export default async function (root) {
   const cur = await api('/api/plan');
   const sources = await optionalApi('/api/sources', { sources: [] });
+  const limits = await loadUsageSettings(api);
   const plans = Object.entries(cur.pricing.plans);
-  const sessionLimit = readLimit('td.session-limit-tokens');
-  const weeklyLimit = readLimit('td.weekly-limit-tokens');
-  const weeklyEnabled = readWeeklyEnabled();
-  const cautionPct = readThreshold('td.weekly-caution-pct', 75);
-  const nearPct = readThreshold('td.weekly-near-pct', 90);
-  const weekStartDay = readWeekStartDay();
   root.innerHTML = `
     <div style="margin-bottom:16px">
       ${dataSourcePanel(sources, { scanButton: true })}
@@ -30,33 +26,53 @@ export default async function (root) {
       <hr class="divider">
 
       <h3>Usage limits</h3>
-      <p class="muted" style="margin:0 0 12px">Sets local dashboard thresholds for the current session and calendar week. These are tracking limits, not confirmed vendor quotas.</p>
+      <p class="muted" style="margin:0 0 12px">Sets dashboard thresholds for latest scanned sessions and browser-local calendar weeks. These are tracking limits, not confirmed vendor quotas.</p>
       <label class="settings-check">
-        <input id="weekly-enabled" type="checkbox" ${weeklyEnabled ? 'checked' : ''}>
+        <input id="weekly-enabled" type="checkbox" ${limits.weekly_enabled ? 'checked' : ''}>
         <span>Track weekly token limit</span>
       </label>
       <div class="settings-grid">
         <label>
-          <span>Session token limit</span>
-          <input id="session-limit" type="number" min="0" step="1000" inputmode="numeric" value="${sessionLimit ?? ''}" placeholder="128000">
+          <span>Global session token limit</span>
+          <input id="session-limit" type="number" min="0" step="1000" inputmode="numeric" value="${limits.session_tokens ?? ''}" placeholder="128000">
         </label>
         <label>
-          <span>Weekly token limit</span>
-          <input id="weekly-limit" type="number" min="0" step="1000" inputmode="numeric" value="${weeklyLimit ?? ''}" placeholder="1000000">
+          <span>Global weekly token limit</span>
+          <input id="weekly-limit" type="number" min="0" step="1000" inputmode="numeric" value="${limits.weekly_tokens ?? ''}" placeholder="1000000">
         </label>
         <label>
           <span>Week starts</span>
           <select id="week-start-day">
-            ${weekDayOptions(weekStartDay)}
+            ${weekDayOptions(limits.week_start_day)}
           </select>
         </label>
         <label>
           <span>Caution at (%)</span>
-          <input id="weekly-caution" type="number" min="1" max="99" step="1" inputmode="numeric" value="${cautionPct}">
+          <input id="weekly-caution" type="number" min="1" max="99" step="1" inputmode="numeric" value="${limits.caution_pct}">
         </label>
         <label>
           <span>Near limit at (%)</span>
-          <input id="weekly-near" type="number" min="1" max="99" step="1" inputmode="numeric" value="${nearPct}">
+          <input id="weekly-near" type="number" min="1" max="99" step="1" inputmode="numeric" value="${limits.near_pct}">
+        </label>
+        <label>
+          <span>Active session window (minutes)</span>
+          <input id="active-window" type="number" min="1" max="1440" step="1" inputmode="numeric" value="${limits.active_session_window_minutes}">
+        </label>
+        <label>
+          <span>Claude session override</span>
+          <input id="claude-session-limit" type="number" min="0" step="1000" inputmode="numeric" value="${limits.providers.claude.session_tokens ?? ''}" placeholder="global">
+        </label>
+        <label>
+          <span>Claude weekly override</span>
+          <input id="claude-weekly-limit" type="number" min="0" step="1000" inputmode="numeric" value="${limits.providers.claude.weekly_tokens ?? ''}" placeholder="global">
+        </label>
+        <label>
+          <span>Codex session override</span>
+          <input id="codex-session-limit" type="number" min="0" step="1000" inputmode="numeric" value="${limits.providers.codex.session_tokens ?? ''}" placeholder="global">
+        </label>
+        <label>
+          <span>Codex weekly override</span>
+          <input id="codex-weekly-limit" type="number" min="0" step="1000" inputmode="numeric" value="${limits.providers.codex.weekly_tokens ?? ''}" placeholder="global">
         </label>
       </div>
       <div class="flex" style="margin-top:12px">
@@ -116,77 +132,36 @@ export default async function (root) {
     $('#msg').style.color = 'var(--good)';
   });
 
-  $('#save-limits').addEventListener('click', () => {
-    saveLimit('td.session-limit-tokens', $('#session-limit').value);
-    saveLimit('td.weekly-limit-tokens', $('#weekly-limit').value);
-    saveWeeklyEnabled($('#weekly-enabled').checked);
-    saveWeekStartDay($('#week-start-day').value);
-    saveThresholds($('#weekly-caution').value, $('#weekly-near').value);
+  $('#save-limits').addEventListener('click', async () => {
+    const payload = normalizeUsageSettings({
+      session_tokens: $('#session-limit').value,
+      weekly_tokens: $('#weekly-limit').value,
+      weekly_enabled: $('#weekly-enabled').checked,
+      week_start_day: $('#week-start-day').value,
+      caution_pct: $('#weekly-caution').value,
+      near_pct: $('#weekly-near').value,
+      active_session_window_minutes: $('#active-window').value,
+      providers: {
+        claude: {
+          session_tokens: $('#claude-session-limit').value,
+          weekly_tokens: $('#claude-weekly-limit').value,
+        },
+        codex: {
+          session_tokens: $('#codex-session-limit').value,
+          weekly_tokens: $('#codex-weekly-limit').value,
+        },
+      },
+    });
+    const saved = await api('/api/settings/usage-limits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    $('#weekly-caution').value = String(saved.caution_pct);
+    $('#weekly-near').value = String(saved.near_pct);
     $('#limits-msg').textContent = 'Saved.';
     $('#limits-msg').style.color = 'var(--good)';
   });
-}
-
-function readLimit(key) {
-  const raw = localStorage.getItem(key);
-  if (!raw) return null;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function saveLimit(key, raw) {
-  const value = Number(raw);
-  if (!raw || !Number.isFinite(value) || value <= 0) {
-    localStorage.removeItem(key);
-  } else {
-    localStorage.setItem(key, String(Math.round(value)));
-  }
-}
-
-function readWeeklyEnabled() {
-  return localStorage.getItem('td.weekly-limit-enabled') !== '0';
-}
-
-function saveWeeklyEnabled(enabled) {
-  localStorage.setItem('td.weekly-limit-enabled', enabled ? '1' : '0');
-}
-
-function readThreshold(key, fallback) {
-  const value = Number(localStorage.getItem(key));
-  return Number.isFinite(value) && value >= 1 && value <= 99 ? value : fallback;
-}
-
-function saveThresholds(cautionRaw, nearRaw) {
-  let caution = Number(cautionRaw);
-  let near = Number(nearRaw);
-  if (!Number.isFinite(caution)) caution = 75;
-  if (!Number.isFinite(near)) near = 90;
-  caution = Math.max(1, Math.min(99, Math.round(caution)));
-  near = Math.max(1, Math.min(99, Math.round(near)));
-  if (near <= caution) near = Math.min(99, caution + 1);
-  localStorage.setItem('td.weekly-caution-pct', String(caution));
-  localStorage.setItem('td.weekly-near-pct', String(near));
-  $('#weekly-caution').value = String(caution);
-  $('#weekly-near').value = String(near);
-}
-
-function readWeekStartDay() {
-  const raw = localStorage.getItem('td.week-start-day');
-  if (raw == null || raw === '') return 1;
-  const value = Number(raw);
-  // Default assumption: weekly limit windows reset Monday at local midnight.
-  // The app has no account-level provider quota API, so this browser setting
-  // controls dashboard tracking only.
-  return Number.isInteger(value) && value >= 0 && value <= 6 ? value : 1;
-}
-
-function saveWeekStartDay(raw) {
-  const value = Number(raw);
-  if (Number.isInteger(value) && value >= 0 && value <= 6) {
-    localStorage.setItem('td.week-start-day', String(value));
-  } else {
-    localStorage.removeItem('td.week-start-day');
-  }
 }
 
 function weekDayOptions(selected) {

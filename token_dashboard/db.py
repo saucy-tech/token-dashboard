@@ -76,6 +76,11 @@ CREATE TABLE IF NOT EXISTS plan (
   v TEXT
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY,
+  v TEXT
+);
+
 CREATE TABLE IF NOT EXISTS dismissed_tips (
   tip_key       TEXT PRIMARY KEY,
   dismissed_at  REAL NOT NULL
@@ -144,11 +149,21 @@ def init_db(path: Union[str, Path]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as c:
         c.executescript(SCHEMA)
+        _migrate_create_settings(c)
         _migrate_add_message_id(c)
         _migrate_add_messages_provider(c)
         _migrate_add_messages_session_label(c)
         _migrate_add_tool_calls_provider(c)
         c.commit()
+
+
+def _migrate_create_settings(conn) -> None:
+    conn.execute("""
+      CREATE TABLE IF NOT EXISTS settings (
+        k TEXT PRIMARY KEY,
+        v TEXT
+      )
+    """)
 
 
 def _migrate_add_message_id(conn) -> None:
@@ -435,13 +450,14 @@ def tool_token_breakdown(db_path, since=None, until=None, provider: Optional[str
 
 
 def ensure_session_rollups(db_path) -> dict:
-    """Refresh per-session aggregates used to identify the current session.
+    """Refresh per-session aggregates used to identify the latest scanned session.
 
     A session starts at the first scanned record timestamp for its session_id.
     Its usage is the sum of all rows with that session_id. Its visible end is
     the latest scanned record timestamp; local logs do not expose an explicit
-    close event. The current session is therefore the latest-ended session per
-    provider, and the latest-ended session overall for all-provider views.
+    close event. The latest scanned session is therefore the latest-ended
+    session per provider, and the latest-ended session overall for all-provider
+    views.
     """
     with connect(db_path) as c:
         signature = _snapshot_signature(c)
@@ -477,6 +493,96 @@ def current_session(db_path, provider: Optional[str] = None) -> Optional[dict]:
         result = dict(row)
         result["models"] = _session_model_rows(c, result["session_id"])
         return result
+
+
+DEFAULT_USAGE_LIMIT_SETTINGS = {
+    "session_tokens": None,
+    "weekly_tokens": None,
+    "weekly_enabled": True,
+    "week_start_day": 1,
+    "caution_pct": 75,
+    "near_pct": 90,
+    "active_session_window_minutes": 20,
+    "providers": {
+        "claude": {"session_tokens": None, "weekly_tokens": None},
+        "codex": {"session_tokens": None, "weekly_tokens": None},
+    },
+}
+
+
+def usage_limit_settings(db_path) -> dict:
+    with connect(db_path) as c:
+        row = c.execute("SELECT v FROM settings WHERE k='usage_limits'").fetchone()
+    if not row:
+        return json.loads(json.dumps(DEFAULT_USAGE_LIMIT_SETTINGS))
+    try:
+        saved = json.loads(row["v"] or "{}")
+    except json.JSONDecodeError:
+        saved = {}
+    return _normalize_usage_limit_settings(saved)
+
+
+def set_usage_limit_settings(db_path, payload: dict) -> dict:
+    settings = _normalize_usage_limit_settings(payload or {})
+    with connect(db_path) as c:
+        c.execute(
+            "INSERT OR REPLACE INTO settings (k, v) VALUES ('usage_limits', ?)",
+            (json.dumps(settings, sort_keys=True),),
+        )
+        c.commit()
+    return settings
+
+
+def _positive_int_or_none(value) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _bounded_int(value, fallback: int, low: int, high: int) -> int:
+    try:
+        parsed = int(round(float(value)))
+    except (TypeError, ValueError):
+        parsed = fallback
+    return max(low, min(high, parsed))
+
+
+def _provider_limit_settings(raw) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "session_tokens": _positive_int_or_none(raw.get("session_tokens")),
+        "weekly_tokens": _positive_int_or_none(raw.get("weekly_tokens")),
+    }
+
+
+def _normalize_usage_limit_settings(raw: dict) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    caution = _bounded_int(raw.get("caution_pct"), 75, 1, 99)
+    near = _bounded_int(raw.get("near_pct"), 90, 1, 99)
+    if near <= caution:
+        near = min(99, caution + 1)
+        if near <= caution:
+            caution = max(1, near - 1)
+    providers_raw = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
+    return {
+        "session_tokens": _positive_int_or_none(raw.get("session_tokens")),
+        "weekly_tokens": _positive_int_or_none(raw.get("weekly_tokens")),
+        "weekly_enabled": bool(raw.get("weekly_enabled", True)),
+        "week_start_day": _bounded_int(raw.get("week_start_day"), 1, 0, 6),
+        "caution_pct": caution,
+        "near_pct": near,
+        "active_session_window_minutes": _bounded_int(
+            raw.get("active_session_window_minutes"), 20, 1, 1440
+        ),
+        "providers": {
+            "claude": _provider_limit_settings(providers_raw.get("claude")),
+            "codex": _provider_limit_settings(providers_raw.get("codex")),
+        },
+    }
 
 
 def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: Optional[str] = None) -> list:

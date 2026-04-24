@@ -371,6 +371,7 @@ def _source_row(
         "connected": status == "connected",
         "log_files": log_files,
         "scanned_files": scanned_files,
+        "last_scan_at": _last_scan_at(db_path, path),
         "cached_sessions": cache["sessions"],
         "cached_messages": cache["messages"],
         "hint": hint,
@@ -425,6 +426,24 @@ def _scanned_file_count(
     except Exception:
         return 0
     return int(row["files"] or 0)
+
+
+def _last_scan_at(
+    db_path: Optional[Union[str, Path]],
+    root: Optional[Path],
+) -> Optional[float]:
+    if not db_path or not root:
+        return None
+    try:
+        prefix = str(root.expanduser())
+        with connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT MAX(scanned_at) AS scanned_at FROM files WHERE path = ? OR path LIKE ?",
+                (prefix, prefix.rstrip("/") + "/%"),
+            ).fetchone()
+    except Exception:
+        return None
+    return float(row["scanned_at"]) if row and row["scanned_at"] is not None else None
 
 
 def _source_data_state(status: str, log_files: int, scanned_files: int, cache: dict) -> str:

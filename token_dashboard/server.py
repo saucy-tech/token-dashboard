@@ -9,6 +9,7 @@ import mimetypes
 import queue
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
@@ -19,6 +20,7 @@ from .db import (
     daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
     ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
     current_session,
+    usage_limit_settings, set_usage_limit_settings,
 )
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
@@ -54,6 +56,36 @@ def _send_bytes(handler, body: bytes, content_type: str, status: int = 200, file
 
 def _send_error(handler, status: int, msg: str) -> None:
     _send_json(handler, {"error": msg}, status=status)
+
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _session_freshness(session: Optional[dict], window_minutes: int) -> dict:
+    if not session:
+        return {
+            "active": False,
+            "stale": True,
+            "window_minutes": window_minutes,
+            "last_update": None,
+            "age_seconds": None,
+        }
+    ended = _parse_iso_utc(session.get("ended_at") or session.get("ended"))
+    age = None if ended is None else max(0, int((datetime.now(timezone.utc) - ended).total_seconds()))
+    active = age is not None and age <= max(1, int(window_minutes)) * 60
+    return {
+        "active": active,
+        "stale": not active,
+        "window_minutes": window_minutes,
+        "last_update": session.get("ended_at") or session.get("ended"),
+        "age_seconds": age,
+    }
 
 
 def _clamp_limit(raw, default: int) -> int:
@@ -414,12 +446,17 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                     since=since, until=until, provider=provider,
                 ))
             if path == "/api/current-session":
+                settings = usage_limit_settings(db_path)
+                window = settings.get("active_session_window_minutes", 20)
+                session = current_session(db_path, provider=provider)
                 return _send_json(self, {
-                    "session": current_session(db_path, provider=provider),
+                    "session": session,
+                    "freshness": _session_freshness(session, window),
                     "definition": {
                         "starts": "first scanned record timestamp for the session_id",
                         "ends": "latest scanned record timestamp; local logs do not expose an explicit close event",
-                        "current": "latest-ended session in the selected provider scope",
+                        "current": "latest scanned session in the selected provider scope",
+                        "active": f"marked active only when the latest scanned update is within {window} minutes",
                         "usage": "sum of token columns for all messages with the session_id",
                     },
                 })
@@ -450,6 +487,8 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 return _send_json(self, all_tips(db_path))
             if path == "/api/plan":
                 return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
+            if path == "/api/settings/usage-limits":
+                return _send_json(self, usage_limit_settings(db_path))
             if path == "/api/scan":
                 n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
                 return _send_json(self, n)
@@ -493,6 +532,9 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
             if url.path == "/api/tips/dismiss":
                 dismiss_tip(db_path, body.get("key", ""))
                 return _send_json(self, {"ok": True})
+            if url.path == "/api/settings/usage-limits":
+                settings = set_usage_limit_settings(db_path, body)
+                return _send_json(self, settings)
             self.send_response(404)
             self.end_headers()
 

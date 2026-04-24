@@ -8,6 +8,7 @@ import {
   withQuery,
   writeHashParams,
 } from '/web/app.js';
+import { limitForProvider, loadUsageSettings, sessionLimitSummary } from '/web/limits.js';
 
 export default async function (root) {
   const id = decodeURIComponent(currentHashPath().split('/')[2] || '');
@@ -73,9 +74,6 @@ async function renderSession(root, id) {
     totalCacheCreate += (t.cache_create_5m_tokens || 0) + (t.cache_create_1h_tokens || 0);
   }
   const billable = totalIn + totalOut + totalCacheCreate;
-  const sessionLimit = readSessionLimit();
-  const usagePct = sessionLimit ? Math.min(100, Math.round((billable / sessionLimit) * 100)) : null;
-  const usageClass = usagePct == null ? '' : (usagePct >= 100 ? 'over' : (usagePct >= 80 ? 'near' : 'ok'));
   const slug = (turns[0] && turns[0].project_slug) || '';
   const cwd = (turns.find(t => t.cwd) || {}).cwd || '';
   const base = cwd ? cwd.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() : '';
@@ -83,6 +81,11 @@ async function renderSession(root, id) {
   const started = (turns[0] && turns[0].timestamp) || '';
   const ended = (turns[turns.length-1] && turns[turns.length-1].timestamp) || '';
   const provider = (turns[0] && turns[0].provider) || '';
+  const settings = await loadUsageSettings(api);
+  const limits = limitForProvider(settings, provider || 'all');
+  const usage = sessionLimitSummary({ billable_tokens: billable }, limits);
+  const usagePct = usage.status.pct == null ? null : usage.pct;
+  const usageClass = usage.status.cls === 'exceeded' ? 'over' : (usage.status.cls === 'near' || usage.status.cls === 'caution' ? 'near' : (usage.status.cls === 'normal' ? 'ok' : ''));
   const sessionLabel = (turns[0] && turns[0].session_label) || '';
   const backProvider = readProvider();
   const backHref = backProvider.key === 'all'
@@ -113,7 +116,7 @@ async function renderSession(root, id) {
           <span style="width:${usagePct == null ? 0 : usagePct}%"></span>
         </div>
         <div class="muted">
-          ${sessionLimit ? `${usagePct}% of ${fmt.compact(sessionLimit)} session limit` : '<a href="#/settings">Set session limit</a>'}
+          ${limits.sessionTokens ? `${usagePct}% of ${fmt.compact(limits.sessionTokens)} session limit` : '<a href="#/settings">Set session limit</a>'}
         </div>
       </div>
     </div>
@@ -161,13 +164,6 @@ async function renderSession(root, id) {
       copyText(btn, turns[Number(btn.dataset.i)]?.prompt_text || '');
     });
   });
-}
-
-function readSessionLimit() {
-  const raw = localStorage.getItem('td.session-limit-tokens');
-  if (!raw) return null;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function sessionHref(sessionId, provider) {
