@@ -5,7 +5,7 @@ import unittest
 from token_dashboard.db import init_db, connect
 from token_dashboard.tips import (
     cache_discipline_tips, repeated_target_tips, right_size_tips,
-    outlier_tips, all_tips, dismiss_tip, doctor_edit_thrashing_tips,
+    outlier_tips, expensive_pattern_tips, all_tips, dismiss_tip, doctor_edit_thrashing_tips,
     doctor_error_loop_tips, doctor_exploration_tips, doctor_abandonment_tips,
     doctor_behavior_tips, doctor_rapid_followup_tips,
 )
@@ -56,6 +56,7 @@ class RepeatTipTests(unittest.TestCase):
         cats = [t["category"] for t in tips]
         self.assertIn("repeat-file", cats)
         self.assertIn("repeat-bash", cats)
+        self.assertTrue(any(t.get("why") and t.get("links") for t in tips))
 
 
 class RightSizeTests(unittest.TestCase):
@@ -87,6 +88,21 @@ class OutlierTests(unittest.TestCase):
             c.commit()
         tips = outlier_tips(self.db, today_iso="2026-04-19T00:00:00")
         self.assertTrue(any(t["category"] == "tool-bloat" for t in tips))
+        self.assertTrue(any(t.get("why") and t.get("links") for t in tips))
+
+    def test_repeated_expensive_pattern_grouped(self):
+        with connect(self.db) as c:
+            for i in range(3):
+                c.execute(
+                    "INSERT INTO tool_calls (message_uuid, session_id, project_slug, provider, tool_name, target, result_tokens, timestamp, is_error) VALUES (?, ?, 'p','codex','exec_command','cat huge.log',30000,'2026-04-18T00:00:00Z',0)",
+                    (f"m{i}", f"s{i}"),
+                )
+            c.commit()
+        tips = expensive_pattern_tips(self.db, today_iso="2026-04-19T00:00:00")
+        tip = next(t for t in tips if t["category"] == "expensive-pattern")
+        self.assertEqual(tip["provider"], "codex")
+        self.assertIn("90,000", tip["title"])
+        self.assertTrue(tip["links"])
 
 
 class DoctorTipTests(unittest.TestCase):

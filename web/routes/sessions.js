@@ -64,12 +64,18 @@ async function renderList(root) {
 async function renderSession(root, id) {
   const turns = await api('/api/sessions/' + encodeURIComponent(id));
   let totalIn = 0, totalOut = 0, totalCacheRd = 0;
+  let totalCacheCreate = 0;
   for (const t of turns) {
     if (t.type !== 'assistant') continue;
     totalIn += t.input_tokens || 0;
     totalOut += t.output_tokens || 0;
     totalCacheRd += t.cache_read_tokens || 0;
+    totalCacheCreate += (t.cache_create_5m_tokens || 0) + (t.cache_create_1h_tokens || 0);
   }
+  const billable = totalIn + totalOut + totalCacheCreate;
+  const sessionLimit = readSessionLimit();
+  const usagePct = sessionLimit ? Math.min(100, Math.round((billable / sessionLimit) * 100)) : null;
+  const usageClass = usagePct == null ? '' : (usagePct >= 100 ? 'over' : (usagePct >= 80 ? 'near' : 'ok'));
   const slug = (turns[0] && turns[0].project_slug) || '';
   const cwd = (turns.find(t => t.cwd) || {}).cwd || '';
   const base = cwd ? cwd.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() : '';
@@ -97,6 +103,18 @@ async function renderSession(root, id) {
         <span>${fmt.sessionShort(id)}</span>
         <span>${turns.length} records</span>
         <span>${fmt.int(totalIn)} in · ${fmt.int(totalOut)} out · ${fmt.int(totalCacheRd)} cache rd</span>
+      </div>
+      <div class="session-limit-strip ${usageClass}">
+        <div>
+          <strong>${fmt.compact(billable)}</strong>
+          <span class="muted">billable tokens in this session</span>
+        </div>
+        <div class="session-limit-meter" aria-label="session limit usage">
+          <span style="width:${usagePct == null ? 0 : usagePct}%"></span>
+        </div>
+        <div class="muted">
+          ${sessionLimit ? `${usagePct}% of ${fmt.compact(sessionLimit)} session limit` : '<a href="#/settings">Set session limit</a>'}
+        </div>
       </div>
     </div>
 
@@ -143,6 +161,13 @@ async function renderSession(root, id) {
       copyText(btn, turns[Number(btn.dataset.i)]?.prompt_text || '');
     });
   });
+}
+
+function readSessionLimit() {
+  const raw = localStorage.getItem('td.session-limit-tokens');
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function sessionHref(sessionId, provider) {

@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from .db import connect
 
@@ -69,6 +70,43 @@ def _provider_label(provider: Optional[str]) -> str:
     if not value:
         return "Agent"
     return value[0].upper() + value[1:]
+
+
+def _session_link(session_id: str, provider: Optional[str] = None, label: Optional[str] = None) -> dict:
+    href = "#/sessions/" + quote(session_id, safe="")
+    if provider:
+        href += "?provider=" + quote(provider, safe="")
+    return {"type": "session", "label": label or f"Session {session_id[:8]}", "href": href}
+
+
+def _prompt_link(user_uuid: str, label: Optional[str] = None) -> dict:
+    return {"type": "prompt", "label": label or f"Prompt {user_uuid[:8]}", "href": "#/prompts?prompt=" + quote(user_uuid, safe="")}
+
+
+def _affected_sessions(c, where_sql: str, args: list, limit: int = 5) -> List[dict]:
+    rows = c.execute(f"""
+      SELECT session_id, COALESCE(provider, 'claude') AS provider, COUNT(*) AS n
+        FROM tool_calls
+       WHERE {where_sql}
+       GROUP BY session_id, provider
+       ORDER BY n DESC
+       LIMIT ?
+    """, [*args, limit]).fetchall()
+    return [_session_link(r["session_id"], r["provider"], f"{r['session_id'][:8]} ({r['n']}x)") for r in rows]
+
+
+def _affected_prompts(c, session_id: str, provider: Optional[str] = None, limit: int = 3) -> List[dict]:
+    rows = c.execute("""
+      SELECT uuid, prompt_text
+        FROM messages
+       WHERE session_id = ? AND type = 'user' AND prompt_text IS NOT NULL
+       ORDER BY timestamp DESC
+       LIMIT ?
+    """, (session_id, limit)).fetchall()
+    return [
+        _prompt_link(r["uuid"], (r["prompt_text"] or "Prompt")[:48])
+        for r in rows
+    ]
 
 
 def _parse_ts(value: Optional[str]) -> Optional[datetime]:
@@ -149,7 +187,8 @@ def repeated_target_tips(db_path, today_iso: Optional[str] = None) -> List[dict]
     out = []
     with connect(db_path) as c:
         for row in c.execute("""
-          SELECT target, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions
+          SELECT target, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
+                 SUM(COALESCE(result_tokens, 0)) AS result_tokens
             FROM tool_calls
            WHERE tool_name IN ('Read','Edit','Write') AND timestamp >= ?
            GROUP BY target HAVING n > 10
@@ -158,14 +197,23 @@ def repeated_target_tips(db_path, today_iso: Optional[str] = None) -> List[dict]
             key = _key("repeat-file", row["target"] or "?")
             if _is_dismissed(db_path, key):
                 continue
+            links = _affected_sessions(
+                c,
+                "tool_name IN ('Read','Edit','Write') AND timestamp >= ? AND target IS ?",
+                [since, row["target"]],
+            )
             out.append({
                 "key": key, "category": "repeat-file",
                 "title": f"{row['target']} read {row['n']} times",
-                "body": f"This file was opened {row['n']} times across {row['sessions']} sessions in the past 7 days. A summary in CLAUDE.md or one read per session would avoid repeats.",
+                "body": f"This file was opened {row['n']} times across {row['sessions']} sessions in the past 7 days. That repeats context the agent already had, so the cost comes from re-sending similar file content into later turns.",
                 "scope": row["target"],
+                "why": f"Repeated file reads contributed {int(row['result_tokens'] or 0):,} local tool-result tokens.",
+                "rule": "Keep a short local note for stable project facts, or ask the agent to read the file once and summarize what it will rely on before editing.",
+                "links": links,
             })
         for row in c.execute("""
-          SELECT target, COUNT(*) AS n
+          SELECT target, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
+                 SUM(COALESCE(result_tokens, 0)) AS result_tokens
             FROM tool_calls
            WHERE tool_name='Bash' AND timestamp >= ?
            GROUP BY target HAVING n > 15
@@ -174,11 +222,19 @@ def repeated_target_tips(db_path, today_iso: Optional[str] = None) -> List[dict]
             key = _key("repeat-bash", row["target"] or "?")
             if _is_dismissed(db_path, key):
                 continue
+            links = _affected_sessions(
+                c,
+                "tool_name='Bash' AND timestamp >= ? AND target IS ?",
+                [since, row["target"]],
+            )
             out.append({
                 "key": key, "category": "repeat-bash",
                 "title": f"`{row['target']}` ran {row['n']} times",
-                "body": f"This bash command ran {row['n']} times in the past 7 days. Consider a watch flag or shell alias.",
+                "body": f"This bash command ran {row['n']} times across {row['sessions']} sessions in the past 7 days. The repeated pattern is expensive when each run returns logs the model has to ingest again.",
                 "scope": row["target"],
+                "why": f"Repeated command output contributed {int(row['result_tokens'] or 0):,} local tool-result tokens.",
+                "rule": "Prefer targeted commands, quiet flags, or piping noisy output to head/tail unless the full log is needed.",
+                "links": links,
             })
     return out
 
@@ -221,18 +277,27 @@ def outlier_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     out = []
     with connect(db_path) as c:
         big = c.execute("""
-          SELECT COUNT(*) AS n, AVG(result_tokens) AS avg_t
+          SELECT COUNT(*) AS n, AVG(result_tokens) AS avg_t,
+                 MAX(result_tokens) AS max_t
             FROM tool_calls
            WHERE tool_name='_tool_result' AND result_tokens > 50000 AND timestamp >= ?
         """, (since,)).fetchone()
         if big and (big["n"] or 0) >= 5:
             key = _key("tool-bloat", "result-50k+")
             if not _is_dismissed(db_path, key):
+                links = _affected_sessions(
+                    c,
+                    "tool_name='_tool_result' AND result_tokens > 50000 AND timestamp >= ?",
+                    [since],
+                )
                 out.append({
                     "key": key, "category": "tool-bloat",
                     "title": f"{big['n']} tool results over 50k tokens this week",
-                    "body": f"Average size is {int(big['avg_t']):,} tokens. Pipe long Bash output to head/tail and ask for narrower file reads.",
+                    "body": f"Average size is {int(big['avg_t']):,} tokens, with the largest at {int(big['max_t'] or 0):,}. These turns were expensive because oversized tool output was copied into local context.",
                     "scope": "result-50k+",
+                    "why": "Large tool results often come from broad searches, full logs, generated files, or unbounded command output.",
+                    "rule": "Use narrower paths, grep with context limits, or pipe long output to head/tail before asking the model to reason over it.",
+                    "links": links,
                 })
         for row in c.execute("""
           SELECT agent_id, COUNT(*) AS n,
@@ -252,6 +317,54 @@ def outlier_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
                     "body": f"Largest invocation used {int(row['max_t']):,} tokens vs mean {int(row['mean_t']):,}. Worth checking what those did differently.",
                     "scope": row["agent_id"],
                 })
+    return out
+
+
+def expensive_pattern_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
+    """Group repeated expensive tool patterns so one noisy workflow is shown once."""
+    today_iso = today_iso or datetime.utcnow().isoformat()
+    since = _iso_days_ago(today_iso, 7)
+    out = []
+    with connect(db_path) as c:
+        rows = c.execute("""
+          SELECT COALESCE(provider, 'claude') AS provider,
+                 project_slug,
+                 tool_name,
+                 COALESCE(target, '(no target)') AS target_key,
+                 COUNT(*) AS calls,
+                 COUNT(DISTINCT session_id) AS sessions,
+                 SUM(COALESCE(result_tokens, 0)) AS total_result_tokens,
+                 MAX(COALESCE(result_tokens, 0)) AS max_result_tokens
+            FROM tool_calls
+           WHERE timestamp >= ?
+             AND COALESCE(result_tokens, 0) > 0
+           GROUP BY provider, project_slug, tool_name, target_key
+          HAVING calls >= 3 AND total_result_tokens >= 75000
+           ORDER BY total_result_tokens DESC
+           LIMIT 10
+        """, (since,)).fetchall()
+        for row in rows:
+            scope = f"{row['provider']}:{row['project_slug']}:{row['tool_name']}:{row['target_key']}"
+            key = _key("expensive-pattern", scope)
+            if _is_dismissed(db_path, key):
+                continue
+            links = _affected_sessions(
+                c,
+                "timestamp >= ? AND COALESCE(provider, 'claude') = ? AND project_slug = ? AND tool_name = ? AND COALESCE(target, '(no target)') = ?",
+                [since, row["provider"], row["project_slug"], row["tool_name"], row["target_key"]],
+            )
+            out.append({
+                "key": key,
+                "category": "expensive-pattern",
+                "provider": row["provider"],
+                "title": f"{row['tool_name']} on {row['target_key']} returned {int(row['total_result_tokens'] or 0):,} tokens",
+                "body": f"This repeated pattern appeared {row['calls']} times across {row['sessions']} sessions in {row['project_slug']}. It was expensive because the same kind of tool output kept being fed back into context.",
+                "scope": row["target_key"],
+                "why": f"Largest single result was {int(row['max_result_tokens'] or 0):,} tokens.",
+                "rule": "Turn repeated expensive discoveries into a local note or narrower command so future sessions do not rediscover the same bulk output.",
+                "links": links,
+                "signal": "repeated-expensive-tool-output",
+            })
     return out
 
 
@@ -284,7 +397,9 @@ def doctor_edit_thrashing_tips(db_path, today_iso: Optional[str] = None) -> List
                 "title": f"{label}: {row['target']} edited {row['edits']} times in one session",
                 "body": f"Doctor-style analysis flags 5+ edits to the same file as edit thrashing. In {row['project_slug']}, this session likely needed a fuller read and one complete edit plan before touching the file again.",
                 "scope": row["session_id"],
+                "why": "Repeated edits usually mean the agent kept rediscovering constraints after each patch, which burns tokens on more reads, diffs, and retries.",
                 "rule": "Read the full file before editing. Plan all changes, then make one complete edit.",
+                "links": [_session_link(row["session_id"], provider), *_affected_prompts(c, row["session_id"], provider, limit=2)],
                 "signal": "edit-thrashing",
                 "severity": "high" if (row["edits"] or 0) >= 10 else "medium",
             })
@@ -393,7 +508,9 @@ def doctor_exploration_tips(db_path, today_iso: Optional[str] = None) -> List[di
             "title": f"{label_prefix}Session {label}",
             "body": body,
             "scope": row["session_id"],
+            "why": "Read/search calls are not bad by themselves; they become expensive when the same session keeps gathering context without converging on a change.",
             "rule": rule,
+            "links": [_session_link(row["session_id"], provider)],
             "signal": signal,
             "severity": "high" if (edits and reads / edits >= 20) or reads >= 40 else "medium",
         })
@@ -630,5 +747,6 @@ def all_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
         *repeated_target_tips(db_path, today_iso),
         *right_size_tips(db_path, today_iso),
         *outlier_tips(db_path, today_iso),
+        *expensive_pattern_tips(db_path, today_iso),
         *doctor_tips(db_path, today_iso),
     ]

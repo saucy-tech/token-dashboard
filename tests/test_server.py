@@ -63,6 +63,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(body["sessions"], 1)
         self.assertEqual(body["turns"], 1)
 
+    def test_overview_week_boundary_excludes_reset_instant(self):
+        body = json.loads(self._get(
+            "/api/overview?since=2026-04-13T00%3A00%3A00Z&until=2026-04-20T00%3A00%3A00Z"
+        ))
+        self.assertEqual(body["sessions"], 2)
+
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT INTO messages (uuid, parent_uuid, session_id, project_slug, provider, type, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens) VALUES ('boundary',NULL,'reset','p','claude','assistant','2026-04-20T00:00:00Z','claude-haiku-4-5',100,100,0,0,0)")
+            c.commit()
+
+        body = json.loads(self._get(
+            "/api/overview?since=2026-04-13T00%3A00%3A00Z&until=2026-04-20T00%3A00%3A00Z"
+        ))
+        self.assertEqual(body["sessions"], 2)
+        self.assertEqual(body["input_tokens"], 3)
+
     def test_trends_json_includes_weekly_rollups(self):
         body = json.loads(self._get("/api/trends?weeks=4&budget_usd=10"))
 
@@ -139,6 +155,13 @@ class ServerTests(unittest.TestCase):
         self.assertIsInstance(body, list)
         providers = {row["provider"] for row in body}
         self.assertEqual(providers, {"claude", "codex"})
+
+    def test_current_session_json(self):
+        body = json.loads(self._get("/api/current-session?provider=codex"))
+        self.assertEqual(body["session"]["session_id"], "s2")
+        self.assertEqual(body["session"]["provider"], "codex")
+        self.assertEqual(body["session"]["billable_tokens"], 5)
+        self.assertIn("definition", body)
 
     def test_sources_json(self):
         body = json.loads(self._get("/api/sources"))

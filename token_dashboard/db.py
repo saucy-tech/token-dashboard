@@ -5,7 +5,9 @@ import os
 import re
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
@@ -103,6 +105,33 @@ CREATE TABLE IF NOT EXISTS usage_snapshot_meta (
   k TEXT PRIMARY KEY,
   v TEXT
 );
+
+CREATE TABLE IF NOT EXISTS session_rollups (
+  session_id              TEXT PRIMARY KEY,
+  provider                TEXT NOT NULL,
+  session_label           TEXT,
+  project_slug            TEXT NOT NULL,
+  project_name            TEXT,
+  cwd                     TEXT,
+  started_at              TEXT NOT NULL,
+  ended_at                TEXT NOT NULL,
+  computed_at             REAL NOT NULL,
+  is_current              INTEGER NOT NULL DEFAULT 0,
+  turns                   INTEGER NOT NULL DEFAULT 0,
+  records                 INTEGER NOT NULL DEFAULT 0,
+  input_tokens            INTEGER NOT NULL DEFAULT 0,
+  output_tokens           INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens       INTEGER NOT NULL DEFAULT 0,
+  cache_create_5m_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_create_1h_tokens  INTEGER NOT NULL DEFAULT 0,
+  billable_tokens         INTEGER NOT NULL DEFAULT 0,
+  primary_model           TEXT,
+  model_count             INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_session_rollups_provider_current
+  ON session_rollups(provider, is_current, ended_at);
+CREATE INDEX IF NOT EXISTS idx_session_rollups_ended
+  ON session_rollups(ended_at);
 """
 
 
@@ -313,7 +342,49 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens", provider: 
        LIMIT ?
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, [*prov_args, limit])]
+        rows = [dict(r) for r in c.execute(sql, [*prov_args, limit])]
+        for row in rows:
+            tools = c.execute("""
+              SELECT tool_name, target, COUNT(*) AS calls,
+                     COALESCE(SUM(result_tokens), 0) AS result_tokens,
+                     MAX(COALESCE(result_tokens, 0)) AS max_result_tokens
+                FROM tool_calls
+               WHERE message_uuid = ?
+               GROUP BY tool_name, target
+               ORDER BY result_tokens DESC, calls DESC
+               LIMIT 5
+            """, (row["assistant_uuid"],)).fetchall()
+            drivers = []
+            total_tool_tokens = 0
+            repeated_reads = 0
+            oversized_results = 0
+            for tool in tools:
+                result_tokens = int(tool["result_tokens"] or 0)
+                calls = int(tool["calls"] or 0)
+                total_tool_tokens += result_tokens
+                if tool["tool_name"] in ("Read", "Grep", "Glob", "LS") and calls > 1:
+                    repeated_reads += calls
+                if result_tokens >= 50000 or int(tool["max_result_tokens"] or 0) >= 50000:
+                    oversized_results += 1
+                drivers.append({
+                    "tool_name": tool["tool_name"],
+                    "target": tool["target"],
+                    "calls": calls,
+                    "result_tokens": result_tokens,
+                    "max_result_tokens": int(tool["max_result_tokens"] or 0),
+                })
+            reasons = []
+            if oversized_results:
+                reasons.append(f"{oversized_results} oversized tool result{'s' if oversized_results != 1 else ''}")
+            if repeated_reads:
+                reasons.append(f"{repeated_reads} repeated read/search calls")
+            if total_tool_tokens:
+                reasons.append(f"{total_tool_tokens:,} tool-result tokens")
+            if not reasons and row["cache_read_tokens"]:
+                reasons.append(f"{int(row['cache_read_tokens']):,} cache-read tokens")
+            row["cost_drivers"] = drivers
+            row["why_expensive"] = "; ".join(reasons) if reasons else "Token use came mostly from the assistant turn itself."
+        return rows
 
 
 def project_summary(db_path, since=None, until=None, provider: Optional[str] = None) -> list:
@@ -363,38 +434,76 @@ def tool_token_breakdown(db_path, since=None, until=None, provider: Optional[str
         return [dict(r) for r in c.execute(sql, [*args, *prov_args])]
 
 
-def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: Optional[str] = None) -> list:
-    rng, args = _range_clause(since, until)
-    prov, prov_args = _provider_clause(provider, col="m.provider")
-    provider_key = _normalize_provider(provider)
+def ensure_session_rollups(db_path) -> dict:
+    """Refresh per-session aggregates used to identify the current session.
+
+    A session starts at the first scanned record timestamp for its session_id.
+    Its usage is the sum of all rows with that session_id. Its visible end is
+    the latest scanned record timestamp; local logs do not expose an explicit
+    close event. The current session is therefore the latest-ended session per
+    provider, and the latest-ended session overall for all-provider views.
+    """
+    with connect(db_path) as c:
+        signature = _snapshot_signature(c)
+        row = c.execute(
+            "SELECT v FROM usage_snapshot_meta WHERE k='session_rollup_signature'"
+        ).fetchone()
+        if row and row["v"] == signature:
+            return {"rebuilt": False, "signature": json.loads(signature)}
+        _rebuild_session_rollups(c)
+        c.execute(
+            "INSERT OR REPLACE INTO usage_snapshot_meta (k, v) VALUES ('session_rollup_signature', ?)",
+            (signature,),
+        )
+        c.commit()
+        return {"rebuilt": True, "signature": json.loads(signature)}
+
+
+def current_session(db_path, provider: Optional[str] = None) -> Optional[dict]:
+    ensure_session_rollups(db_path)
+    prov, prov_args = _provider_clause(provider)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sql = f"""
-      SELECT session_id, project_slug,
-             COALESCE(MAX(provider), 'claude') AS provider,
-             MAX(session_label) AS session_label,
-             MIN(timestamp) AS started, MAX(timestamp) AS ended,
-             SUM(CASE WHEN type='user' THEN 1 ELSE 0 END) AS turns,
-             SUM(input_tokens)+SUM(output_tokens) AS tokens
-        FROM messages m
+      SELECT *
+        FROM session_rollups
+       WHERE ended_at <= ? {prov}
+       ORDER BY ended_at DESC, started_at DESC
+       LIMIT 1
+    """
+    with connect(db_path) as c:
+        row = c.execute(sql, [now, *prov_args]).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["models"] = _session_model_rows(c, result["session_id"])
+        return result
+
+
+def recent_sessions(db_path, limit: int = 20, since=None, until=None, provider: Optional[str] = None) -> list:
+    ensure_session_rollups(db_path)
+    where, args = [], []
+    if since:
+        where.append("ended_at >= ?")
+        args.append(since)
+    if until:
+        where.append("started_at < ?")
+        args.append(until)
+    rng = (" AND " + " AND ".join(where)) if where else ""
+    prov, prov_args = _provider_clause(provider)
+    sql = f"""
+      SELECT session_id, project_slug, provider, session_label,
+             project_name, started_at AS started, ended_at AS ended,
+             turns, input_tokens + output_tokens AS tokens, billable_tokens,
+             input_tokens, output_tokens, cache_read_tokens,
+             cache_create_5m_tokens, cache_create_1h_tokens,
+             primary_model, model_count, is_current
+        FROM session_rollups
        WHERE 1=1 {rng}{prov}
-       GROUP BY session_id
        ORDER BY ended DESC
        LIMIT ?
     """
     with connect(db_path) as c:
         rows = [dict(r) for r in c.execute(sql, [*args, *prov_args, limit])]
-        # Cache per-slug name lookups so we don't query once per session.
-        slug_cache = {}
-        for r in rows:
-            slug = r["project_slug"]
-            if slug not in slug_cache:
-                cwd_sql = "SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL"
-                cwd_args = [slug]
-                if provider_key:
-                    cwd_sql += " AND COALESCE(provider, 'claude') = ?"
-                    cwd_args.append(provider_key)
-                cwds = [row["cwd"] for row in c.execute(cwd_sql, cwd_args)]
-                slug_cache[slug] = best_project_name(cwds, slug)
-            r["project_name"] = slug_cache[slug]
     return rows
 
 
@@ -429,6 +538,110 @@ def session_turns(db_path, session_id: str) -> list:
         for row in rows:
             row["tool_calls"] = by_message.get(row["uuid"], [])
         return rows
+
+
+def _session_model_rows(conn, session_id: str) -> list:
+    rows = conn.execute(
+        """
+          SELECT COALESCE(model, 'unknown') AS model,
+                 COUNT(*) AS turns,
+                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                 COALESCE(SUM(cache_create_5m_tokens), 0) AS cache_create_5m_tokens,
+                 COALESCE(SUM(cache_create_1h_tokens), 0) AS cache_create_1h_tokens,
+                 COALESCE(SUM(input_tokens + output_tokens + cache_create_5m_tokens + cache_create_1h_tokens), 0)
+                   AS billable_tokens
+            FROM messages
+           WHERE session_id = ?
+             AND type = 'assistant'
+           GROUP BY COALESCE(model, 'unknown')
+           ORDER BY billable_tokens DESC
+        """,
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _rebuild_session_rollups(conn) -> None:
+    conn.execute("DELETE FROM session_rollups")
+    computed_at = time.time()
+    conn.execute(
+        """
+          INSERT OR REPLACE INTO session_rollups (
+            session_id, provider, session_label, project_slug, project_name, cwd,
+            started_at, ended_at, computed_at, is_current, turns, records,
+            input_tokens, output_tokens, cache_read_tokens,
+            cache_create_5m_tokens, cache_create_1h_tokens, billable_tokens,
+            primary_model, model_count
+          )
+          SELECT session_id,
+                 COALESCE(MAX(provider), 'claude') AS provider,
+                 MAX(session_label) AS session_label,
+                 COALESCE(MAX(project_slug), '') AS project_slug,
+                 '' AS project_name,
+                 MAX(cwd) AS cwd,
+                 MIN(timestamp) AS started_at,
+                 MAX(timestamp) AS ended_at,
+                 ? AS computed_at,
+                 0 AS is_current,
+                 SUM(CASE WHEN type = 'user' THEN 1 ELSE 0 END) AS turns,
+                 COUNT(*) AS records,
+                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                 COALESCE(SUM(cache_create_5m_tokens), 0) AS cache_create_5m_tokens,
+                 COALESCE(SUM(cache_create_1h_tokens), 0) AS cache_create_1h_tokens,
+                 COALESCE(SUM(input_tokens + output_tokens + cache_create_5m_tokens + cache_create_1h_tokens), 0)
+                   AS billable_tokens,
+                 NULL AS primary_model,
+                 0 AS model_count
+            FROM messages
+           WHERE session_id IS NOT NULL
+             AND timestamp IS NOT NULL
+           GROUP BY session_id
+        """,
+        (computed_at,),
+    )
+    rows = conn.execute("SELECT session_id, project_slug FROM session_rollups").fetchall()
+    for row in rows:
+        session_id = row["session_id"]
+        project_slug = row["project_slug"]
+        cwds = [
+            r["cwd"]
+            for r in conn.execute(
+                "SELECT DISTINCT cwd FROM messages WHERE session_id = ? AND cwd IS NOT NULL",
+                (session_id,),
+            )
+        ]
+        models = _session_model_rows(conn, session_id)
+        primary_model = models[0]["model"] if models else None
+        conn.execute(
+            """
+              UPDATE session_rollups
+                 SET project_name = ?,
+                     primary_model = ?,
+                     model_count = ?
+               WHERE session_id = ?
+            """,
+            (best_project_name(cwds, project_slug), primary_model, len(models), session_id),
+        )
+    current_rows = conn.execute(
+        """
+          SELECT provider, session_id
+            FROM session_rollups sr
+           WHERE ended_at = (
+             SELECT MAX(ended_at)
+               FROM session_rollups
+              WHERE provider = sr.provider
+           )
+        """
+    ).fetchall()
+    for row in current_rows:
+        conn.execute(
+            "UPDATE session_rollups SET is_current = 1 WHERE provider = ? AND session_id = ?",
+            (row["provider"], row["session_id"]),
+        )
 
 
 def daily_token_breakdown(db_path, since=None, until=None, provider: Optional[str] = None) -> list:

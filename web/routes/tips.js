@@ -19,7 +19,12 @@ export default async function (root) {
             <button class="ghost" data-key="${fmt.htmlSafe(t.key)}">dismiss</button>
           </div>
           <p class="tip-body">${fmt.htmlSafe(t.body)}</p>
+          ${t.why ? `<div class="tip-why"><span>Why</span>${fmt.htmlSafe(t.why)}</div>` : ''}
           ${t.rule ? `<div class="tip-rule"><span>Rule</span>${fmt.htmlSafe(t.rule)}</div>` : ''}
+          ${Array.isArray(t.links) && t.links.length ? `
+            <div class="tip-links">
+              ${t.links.map(link => `<a href="${fmt.htmlSafe(link.href)}" class="button-link ${link.type === 'prompt' ? 'blur-sensitive' : ''}">${fmt.htmlSafe(link.label)}</a>`).join('')}
+            </div>` : ''}
         </div>`).join('')}
     </div>`;
   root.querySelectorAll('button[data-key]').forEach(b => {

@@ -36,6 +36,7 @@ function sessionHref(sessionId, provider) {
 export default async function (root) {
   const sort = readSort();
   const provider = readProvider();
+  const selectedPrompt = readHashParam('prompt');
   const rows = await api(withQuery('/api/prompts', {
     limit: 100,
     sort: sort.key,
@@ -81,6 +82,7 @@ export default async function (root) {
         <thead><tr>
           <th>${sort.key === 'recent' ? 'when' : 'cache-read cost'}</th>
           <th>prompt</th>
+          <th>why</th>
           <th>provider</th>
           <th>model</th>
           <th class="num">tokens</th>
@@ -89,15 +91,16 @@ export default async function (root) {
         </tr></thead>
         <tbody>
           ${rows.map((r,i) => `
-            <tr data-i="${i}" style="cursor:pointer">
+            <tr data-i="${i}" data-prompt="${fmt.htmlSafe(r.user_uuid)}" style="cursor:pointer">
               <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : promptCost(r)}</td>
               <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
+              <td>${fmt.htmlSafe(fmt.short(r.why_expensive || '', 90))}</td>
               <td><span class="badge ${fmt.providerClass(r.provider)}">${fmt.htmlSafe(fmt.providerLabel(r.provider))}</span></td>
               <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
               <td class="num">${fmt.int(r.billable_tokens)}</td>
               <td class="num">${fmt.int(r.cache_read_tokens)}</td>
               <td><a href="${sessionHref(r.session_id, provider)}" class="mono" onclick="event.stopPropagation()">${fmt.htmlSafe(fmt.sessionShort(r.session_id))}</a></td>
-            </tr>`).join('') || '<tr><td colspan="7" class="muted">no prompts yet</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="8" class="muted">no prompts yet</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -109,11 +112,11 @@ export default async function (root) {
     if (btn.dataset.provider) btn.addEventListener('click', () => writeProvider(btn.dataset.provider));
   });
 
-  root.querySelectorAll('#prompts tbody tr[data-i]').forEach(tr => {
-    tr.addEventListener('click', () => {
-      const r = rows[Number(tr.dataset.i)];
-      const drawer = document.getElementById('drawer');
-      drawer.innerHTML = `
+  function openPrompt(index) {
+    const r = rows[Number(index)];
+    if (!r) return;
+    const drawer = document.getElementById('drawer');
+    drawer.innerHTML = `
         <div class="card">
           <h3 style="display:flex;align-items:center">
             <span>Prompt detail</span>
@@ -122,6 +125,23 @@ export default async function (root) {
             <span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span>
           </h3>
           <pre class="blur-sensitive">${fmt.htmlSafe(r.prompt_text || '')}</pre>
+          <div class="prompt-why">
+            <h3>Why this was expensive</h3>
+            <p>${fmt.htmlSafe(r.why_expensive || 'Token use came mostly from the assistant turn itself.')}</p>
+            ${Array.isArray(r.cost_drivers) && r.cost_drivers.length ? `
+              <table class="tool-detail-table">
+                <thead><tr><th>tool</th><th>target</th><th class="num">calls</th><th class="num">result tokens</th></tr></thead>
+                <tbody>
+                  ${r.cost_drivers.map(d => `
+                    <tr>
+                      <td><span class="badge">${fmt.htmlSafe(d.tool_name)}</span></td>
+                      <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(d.target || '', 90))}</td>
+                      <td class="num">${fmt.int(d.calls)}</td>
+                      <td class="num">${fmt.int(d.result_tokens)}</td>
+                    </tr>`).join('')}
+                </tbody>
+              </table>` : ''}
+          </div>
           <div class="flex" style="margin-top:12px;flex-wrap:wrap;gap:14px">
             <span class="muted">${fmt.ts(r.timestamp)}</span>
             <span class="muted">${fmt.int(r.billable_tokens)} billable · ${fmt.int(r.cache_read_tokens)} cache rd · ${promptCostDetail(r)}</span>
@@ -129,9 +149,17 @@ export default async function (root) {
             <a href="${sessionHref(r.session_id, provider)}">Open session →</a>
           </div>
         </div>`;
-      drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    });
+    drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  root.querySelectorAll('#prompts tbody tr[data-i]').forEach(tr => {
+    tr.addEventListener('click', () => openPrompt(tr.dataset.i));
   });
+
+  if (selectedPrompt) {
+    const index = rows.findIndex(r => r.user_uuid === selectedPrompt);
+    if (index >= 0) openPrompt(index);
+  }
 }
 
 function promptCost(r) {

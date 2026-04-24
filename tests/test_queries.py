@@ -8,7 +8,7 @@ from token_dashboard.db import (
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, project_name_for,
     provider_breakdown, skill_breakdown, ensure_usage_snapshots,
-    snapshot_rollups, snapshot_dimension_rows,
+    snapshot_rollups, snapshot_dimension_rows, current_session,
 )
 
 
@@ -52,6 +52,18 @@ class QueryTests(unittest.TestCase):
         rows = expensive_prompts(self.db, limit=10)
         self.assertGreaterEqual(len(rows), 2)
         self.assertEqual(rows[0]["prompt_text"], "big prompt")
+        self.assertIn("why_expensive", rows[0])
+        self.assertIn("cost_drivers", rows[0])
+
+    def test_expensive_prompts_explains_tool_result_drivers(self):
+        with connect(self.db) as c:
+            c.execute("UPDATE tool_calls SET result_tokens=60000 WHERE message_uuid='a1' AND tool_name='Read'")
+            c.execute("INSERT INTO tool_calls (message_uuid, session_id, project_slug, provider, tool_name, target, result_tokens, timestamp, is_error) VALUES ('a1','s1','projA','claude','Read','foo.py',1000,'2026-04-10T00:00:02Z',0)")
+            c.commit()
+        row = expensive_prompts(self.db, limit=10)[0]
+        self.assertIn("oversized tool result", row["why_expensive"])
+        self.assertIn("repeated read/search", row["why_expensive"])
+        self.assertEqual(row["cost_drivers"][0]["tool_name"], "Read")
 
     def test_expensive_prompts_sort_recent(self):
         rows = expensive_prompts(self.db, limit=10, sort="recent")
@@ -93,6 +105,51 @@ class QueryTests(unittest.TestCase):
         rows = recent_sessions(self.db, limit=5, provider="claude")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["session_id"], "s1")
+        self.assertEqual(rows[0]["billable_tokens"], 300)
+
+    def test_current_session_uses_latest_session_rollup(self):
+        row = current_session(self.db)
+        self.assertEqual(row["session_id"], "s2")
+        self.assertEqual(row["started_at"], "2026-04-11T00:00:00Z")
+        self.assertEqual(row["ended_at"], "2026-04-11T00:00:01Z")
+        self.assertEqual(row["provider"], "codex")
+        self.assertEqual(row["billable_tokens"], 10)
+        self.assertEqual(row["primary_model"], "claude-sonnet-4-6")
+        self.assertEqual(row["models"][0]["billable_tokens"], 10)
+
+    def test_current_session_can_filter_provider(self):
+        row = current_session(self.db, provider="claude")
+        self.assertEqual(row["session_id"], "s1")
+        self.assertEqual(row["is_current"], 1)
+
+    def test_current_session_ignores_future_sessions(self):
+        with connect(self.db) as c:
+            c.execute("INSERT INTO messages (uuid, session_id, project_slug, provider, type, timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens) VALUES ('future','future','projA','claude','assistant','2999-01-01T00:00:00Z','claude-opus-4-7',1000,1000,0,0,0)")
+            c.commit()
+        row = current_session(self.db, provider="claude")
+        self.assertEqual(row["session_id"], "s1")
+
+    def test_session_attribution_sums_only_matching_session_id(self):
+        with connect(self.db) as c:
+            c.executescript("""
+            INSERT INTO messages (uuid, parent_uuid, session_id, project_slug, provider, type, timestamp, model,
+              input_tokens, output_tokens, cache_read_tokens, cache_create_5m_tokens, cache_create_1h_tokens)
+            VALUES
+              ('u3',NULL,'s1','projA','claude','user','2026-04-12T00:00:00Z',NULL,0,0,0,0,0),
+              ('a3','u3','s1','projA','claude','assistant','2026-04-12T00:00:01Z','claude-opus-4-7',7,11,13,17,19),
+              ('u4',NULL,'s-other','projA','claude','user','2026-04-13T00:00:00Z',NULL,0,0,0,0,0),
+              ('a4','u4','s-other','projA','claude','assistant','2026-04-13T00:00:01Z','claude-opus-4-7',1000,1000,0,0,0);
+            """)
+            c.commit()
+
+        rows = {row["session_id"]: row for row in recent_sessions(self.db, limit=10, provider="claude")}
+
+        self.assertEqual(rows["s1"]["input_tokens"], 107)
+        self.assertEqual(rows["s1"]["output_tokens"], 211)
+        self.assertEqual(rows["s1"]["cache_read_tokens"], 313)
+        self.assertEqual(rows["s1"]["billable_tokens"], 354)
+        self.assertEqual(rows["s1"]["started"], "2026-04-10T00:00:00Z")
+        self.assertEqual(rows["s1"]["ended"], "2026-04-12T00:00:01Z")
 
     def test_session_turns(self):
         rows = session_turns(self.db, "s1")

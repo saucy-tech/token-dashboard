@@ -18,6 +18,7 @@ from .db import (
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
     ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
+    current_session,
 )
 from .pricing import load_pricing, cost_for, get_plan, set_plan
 from .tips import all_tips, dismiss_tip
@@ -412,6 +413,16 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                     db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
                     since=since, until=until, provider=provider,
                 ))
+            if path == "/api/current-session":
+                return _send_json(self, {
+                    "session": current_session(db_path, provider=provider),
+                    "definition": {
+                        "starts": "first scanned record timestamp for the session_id",
+                        "ends": "latest scanned record timestamp; local logs do not expose an explicit close event",
+                        "current": "latest-ended session in the selected provider scope",
+                        "usage": "sum of token columns for all messages with the session_id",
+                    },
+                })
             if path == "/api/daily":
                 return _send_json(self, daily_token_breakdown(db_path, since, until, provider=provider))
             if path == "/api/skills":

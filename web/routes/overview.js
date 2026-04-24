@@ -11,6 +11,7 @@ import {
   writeHashParams,
 } from '/web/app.js';
 import { barChart, donutChart, groupedBarChart, lineChart, stackedBarChart } from '/web/charts.js';
+import { billableTokens, currentWeekWindow, limitStatus, progressPct } from '/web/limits.js';
 
 const RANGES = [
   { key: '7d',  label: '7d',  days: 7 },
@@ -62,9 +63,16 @@ export default async function (root) {
   const since = sinceIso(range);
   const params = queryParams(since, provider);
   const weeklyBudget = readWeeklyBudget();
+  const weekWindow = currentWeekWindow(new Date(), readWeekStartDay());
+  const weekParams = {
+    since: weekWindow.start.toISOString(),
+    until: weekWindow.reset.toISOString(),
+    provider: provider.key === 'all' ? null : provider.key,
+  };
 
-  const [totals, trends, projects, sessions, tools, daily, byModel, providers, sources] = await Promise.all([
+  const [totals, currentWeek, trends, projects, sessions, currentSession, tools, daily, byModel, providers, sources] = await Promise.all([
     api(withQuery('/api/overview', params)),
+    api(withQuery('/api/overview', weekParams)),
     api(withQuery('/api/trends', {
       provider: provider.key === 'all' ? null : provider.key,
       weeks: 12,
@@ -72,6 +80,9 @@ export default async function (root) {
     })),
     api(withQuery('/api/projects', params)),
     api(withQuery('/api/sessions', { ...params, limit: 10 })),
+    api(withQuery('/api/current-session', {
+      provider: provider.key === 'all' ? null : provider.key,
+    })),
     api(withQuery('/api/tools', params)),
     api(withQuery('/api/daily', params)),
     api(withQuery('/api/by-model', params)),
@@ -115,6 +126,7 @@ export default async function (root) {
   const trendWeeks = trends.weeks || [];
   const latestWeek = trendWeeks[trendWeeks.length - 1] || {};
   const budget = trends.budget;
+  const usageLimits = readUsageLimits();
 
   const rangeTabs = `
     <div class="range-tabs" role="tablist">
@@ -151,6 +163,17 @@ export default async function (root) {
         ${costSub}
       </div>
     </div>
+
+    ${usageLimitsSection({
+      latestSession: currentSession.session,
+      currentWeek,
+      weekWindow,
+      trendWeeks,
+      budget,
+      limits: usageLimits,
+      provider,
+      sources,
+    })}
 
     <div class="overview-section-head">
       <h3>Trends</h3>
@@ -206,6 +229,10 @@ export default async function (root) {
         <dt>Cache create</dt><dd>Writing something into the cache for the first time. One-time cost; pays off on the next turn.</dd>
         <dt>Billable tokens</dt><dd>Input + Output + Cache create. Cache reads are billed separately (and much cheaper).</dd>
         <dt>API-equivalent cost</dt><dd>Estimated from token rates in <code>pricing.json</code>. Subscription plans are shown as context, not added to this number.</dd>
+        <dt>Current session</dt><dd>The most recent locally scanned assistant session for the selected provider. It may trail the vendor app until the next scan finishes.</dd>
+        <dt>Weekly limit</dt><dd>A dashboard-tracked threshold you set for this local data. It is not a guaranteed vendor quota.</dd>
+        <dt>Remaining usage</dt><dd>Your configured weekly limit minus the current local weekly total. Missing or unscanned sources can make this optimistic.</dd>
+        <dt>Reset time</dt><dd>The next local calendar-week boundary used by the dashboard: Monday at 00:00 in your browser's time zone.</dd>
       </dl>
     </details>
 
@@ -356,6 +383,208 @@ function readWeeklyBudget() {
   if (!raw) return null;
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function readPositiveNumber(key) {
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function readUsageLimits() {
+  const weeklyEnabled = localStorage.getItem('td.weekly-limit-enabled') !== '0';
+  const weeklyTokens = readPositiveNumber('td.weekly-limit-tokens');
+  return {
+    sessionTokens: readPositiveNumber('td.session-limit-tokens'),
+    weeklyTokens: weeklyEnabled ? weeklyTokens : null,
+    weeklyConfigured: weeklyTokens,
+    weeklyEnabled,
+    cautionPct: readThreshold('td.weekly-caution-pct', 75),
+    nearPct: readThreshold('td.weekly-near-pct', 90),
+  };
+}
+
+function readThreshold(key, fallback) {
+  const value = Number(localStorage.getItem(key));
+  return Number.isFinite(value) && value >= 1 && value <= 99 ? value : fallback;
+}
+
+function readWeekStartDay() {
+  const raw = localStorage.getItem('td.week-start-day');
+  if (raw == null || raw === '') return 1;
+  const value = Number(raw);
+  // Default assumption: dashboard weekly limits reset Monday at local 00:00.
+  // This mirrors the existing weekly rollup language while allowing the
+  // browser-local settings UI to change the boundary.
+  return Number.isInteger(value) && value >= 0 && value <= 6 ? value : 1;
+}
+
+function formatReset(reset) {
+  return reset.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function usageProgressRow({ label, used, limit, status, meta, emptyText }) {
+  const pct = progressPct(status);
+  const value = limit ? `${fmt.compact(used)} / ${fmt.compact(limit)}` : fmt.compact(used);
+  const sub = limit ? `${status.label} · ${fmt.int(used)} of ${fmt.int(limit)} tokens` : emptyText;
+  return `
+    <div class="limit-progress-row ${status.cls}">
+      <div class="limit-progress-main">
+        <div>
+          <div class="limit-label">
+            <span>${fmt.htmlSafe(label)}</span>
+            ${limit ? `<span class="limit-state">${fmt.htmlSafe(status.name)}</span>` : ''}
+          </div>
+          <div class="limit-value" title="${fmt.htmlSafe(limit ? `${fmt.int(used)} of ${fmt.int(limit)} tokens` : `${fmt.int(used)} tokens`)}">${fmt.htmlSafe(value)}</div>
+        </div>
+        <div class="limit-meta">${fmt.htmlSafe(meta)}</div>
+      </div>
+      <div class="limit-meter" aria-label="${fmt.htmlSafe(label)} progress">
+        <span style="width:${pct}%"></span>
+      </div>
+      <div class="limit-sub">${fmt.htmlSafe(sub)}</div>
+    </div>`;
+}
+
+function usageMetric(label, value, sub = '', cls = '') {
+  return `
+    <div class="limit-metric ${cls}">
+      <div class="label">${fmt.htmlSafe(label)}</div>
+      <div class="value" title="${fmt.htmlSafe(String(value ?? '—'))}">${fmt.htmlSafe(String(value ?? '—'))}</div>
+      ${sub ? `<div class="sub">${fmt.htmlSafe(sub)}</div>` : ''}
+    </div>`;
+}
+
+function weeklyHistorySummary(trendWeeks, currentWeek, limits) {
+  const rows = [...(trendWeeks || [])];
+  const currentStart = currentWeek?.start_date;
+  const currentIdx = rows.findIndex(w => w.start_date === currentStart);
+  if (currentIdx >= 0) rows[currentIdx] = { ...rows[currentIdx], ...currentWeek };
+  else if (currentWeek?.start_date) rows.push(currentWeek);
+  const visible = rows.slice(-5);
+  if (!visible.length) return '';
+  const values = visible.map(w => billableTokens(w));
+  const max = Math.max(...values, limits.weeklyTokens || 0, 1);
+  const current = values[values.length - 1] || 0;
+  const previous = values.length > 1 ? values[values.length - 2] : null;
+  const delta = previous == null ? null : current - previous;
+  const deltaTextValue = delta == null
+    ? 'no prior week'
+    : `${delta >= 0 ? '+' : ''}${fmt.compact(delta)} vs previous week`;
+  const deltaClassValue = delta == null || delta === 0 ? '' : (delta > 0 ? 'near' : 'normal');
+  return `
+    <div class="limit-history">
+      <div class="limit-history-head">
+        <span>Weekly history</span>
+        <span class="${deltaClassValue}">${fmt.htmlSafe(deltaTextValue)}</span>
+      </div>
+      <div class="limit-history-bars">
+        ${visible.map((week, i) => {
+          const value = values[i] || 0;
+          const pct = Math.max(2, Math.round((value / max) * 100));
+          const isCurrent = i === visible.length - 1;
+          return `
+            <div class="limit-history-bar ${isCurrent ? 'current' : ''}" title="${fmt.htmlSafe(`${week.start_date}: ${fmt.int(value)} tokens`)}">
+              <span style="height:${pct}%"></span>
+              <em>${fmt.htmlSafe(shortWeekLabel(week.start_date))}</em>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function shortWeekLabel(dateStr) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return dateStr.slice(5);
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks, budget, limits, provider, sources }) {
+  const currentTokens = latestSession ? billableTokens(latestSession) : 0;
+  const currentStatus = limitStatus(currentTokens, limits.sessionTokens);
+  const weeklyTokens = billableTokens(currentWeek);
+  const weeklyStatus = limitStatus(weeklyTokens, limits.weeklyTokens, limits);
+  const remainingTokens = limits.weeklyTokens == null ? null : Math.max(0, limits.weeklyTokens - weeklyTokens);
+  const sessionHref = latestSession ? (
+    '#/sessions/' + encodeURIComponent(latestSession.session_id) + (
+      provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
+    )
+  ) : '#/sessions';
+  const partial = (sources.sources || []).some(s => !['ready', 'disabled'].includes(s.data_state || ''));
+  const reset = formatReset(weekWindow.reset);
+  const weeklyCost = budget
+    ? `${fmt.usd(budget.current_week_cost_usd)} of ${fmt.usd(budget.weekly_budget_usd)}`
+    : 'cost budget not set';
+  const sessionMeta = latestSession
+    ? `${fmt.providerLabel(latestSession.provider)} · started ${fmt.ts(latestSession.started_at || latestSession.started)}`
+    : 'no scanned session';
+  const weekMeta = `${fmt.ts(weekWindow.start.toISOString())} to ${reset}`;
+  const weeklyUsedLabel = limits.weeklyTokens ? `${progressPct(weeklyStatus)}%` : '—';
+  const remainingLabel = remainingTokens == null ? '—' : fmt.compact(remainingTokens);
+  const warningText = weeklyLimitWarning(weeklyStatus, remainingTokens);
+  return `
+    <div class="card usage-limits">
+      <div class="usage-limits-head">
+        <div>
+          <h3>Usage limits</h3>
+          <p class="muted">Local thresholds for the selected provider scope. Usage is measured from scanned session logs.</p>
+        </div>
+        <a href="#/settings" class="button-link">Configure</a>
+      </div>
+
+      <div class="limit-panel">
+        ${usageProgressRow({
+          label: 'Current session',
+          used: currentTokens,
+          limit: limits.sessionTokens,
+          status: currentStatus,
+          meta: sessionMeta,
+          emptyText: limits.sessionTokens ? 'no scanned session usage yet' : 'set a session token threshold',
+        })}
+        ${usageProgressRow({
+          label: 'Current week',
+          used: weeklyTokens,
+          limit: limits.weeklyTokens,
+          status: weeklyStatus,
+          meta: weekMeta,
+          emptyText: limits.weeklyEnabled ? weeklyCost : 'weekly limit disabled',
+        })}
+      </div>
+
+      <div class="limit-metrics">
+        ${usageMetric('Weekly used', weeklyUsedLabel, limits.weeklyTokens ? `${fmt.compact(weeklyTokens)} consumed` : (limits.weeklyEnabled ? 'set weekly token limit' : 'limit disabled'), weeklyStatus.cls)}
+        ${usageMetric('Remaining', remainingLabel, remainingTokens == null ? (limits.weeklyEnabled ? 'weekly limit not set' : 'limit disabled') : 'tokens available', remainingTokens === 0 && limits.weeklyTokens ? 'exceeded' : 'normal')}
+        ${usageMetric('Reset', reset, 'local time')}
+      </div>
+
+      ${warningText ? `<div class="limit-warning ${weeklyStatus.cls}">${fmt.htmlSafe(warningText)}</div>` : ''}
+
+      ${weeklyHistorySummary(trendWeeks, {
+        ...currentWeek,
+        start_date: weekWindow.start.toISOString().slice(0, 10),
+      }, limits)}
+
+      <div class="usage-limits-foot">
+        <a href="${sessionHref}">${latestSession ? 'Open current session' : 'View sessions'}</a>
+        <span class="muted">${partial ? 'Data coverage is partial; remaining usage may be optimistic.' : `Current week: ${fmt.ts(weekWindow.start.toISOString())} to reset.`}</span>
+      </div>
+    </div>`;
+}
+
+function weeklyLimitWarning(status, remainingTokens) {
+  if (!status || status.pct == null) return '';
+  if (status.cls === 'exceeded') return 'Weekly limit exceeded. New usage will count beyond your configured allowance until reset.';
+  if (status.cls === 'near') return `${fmt.compact(remainingTokens)} tokens remain before this weekly limit is reached.`;
+  if (status.cls === 'caution') return 'Weekly usage is climbing. Keep an eye on large prompts, tool results, and long sessions.';
+  return '';
 }
 
 function trendKpi(label, value, sub = '', cls = '') {
