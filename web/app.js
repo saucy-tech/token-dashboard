@@ -101,6 +101,12 @@ export function readHashParam(key, fallback = null) {
   return params.get(key) ?? fallback;
 }
 
+/** Alias for hash query reads (legacy routes). */
+export function readQuery(key, def = '') {
+  const v = readHashParam(key, null);
+  return v == null || v === '' ? def : v;
+}
+
 export function writeHashParams(updates, base = currentHashPath()) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   Object.entries(updates).forEach(([key, value]) => {
@@ -217,6 +223,7 @@ export function exportHref(name, format, params = {}) {
 }
 
 const ROUTES = {
+  '/home': () => import('/web/routes/home.js'),
   '/overview': () => import('/web/routes/overview.js'),
   '/comparison': () => import('/web/routes/comparison.js'),
   '/prompts':  () => import('/web/routes/prompts.js'),
@@ -256,14 +263,25 @@ let _sseTimer = null;
 
 async function render() {
   _rendering = true;
+  let routeKey = '/overview';
   try {
-    const hash = location.hash.replace(/^#/, '') || '/overview';
+    let hash = location.hash.replace(/^#/, '') || '/home';
+    const bare = hash.split('?')[0];
+    if (bare === '/claude') {
+      location.hash = '#/overview?provider=claude';
+      return;
+    }
+    if (bare === '/codex') {
+      location.hash = '#/overview?provider=codex';
+      return;
+    }
+    hash = location.hash.replace(/^#/, '') || '/home';
     const path = hash.split('?')[0];
-    let key = path;
-    if (path.startsWith('/sessions/')) key = '/sessions';
-    if (path.startsWith('/projects/')) key = '/projects/:slug';
-    setActiveTab(key === '/projects/:slug' ? '/projects' : key);
-    const loader = ROUTES[key] || ROUTES['/overview'];
+    routeKey = path;
+    if (path.startsWith('/sessions/')) routeKey = '/sessions';
+    if (path.startsWith('/projects/')) routeKey = '/projects/:slug';
+    setActiveTab(routeKey === '/projects/:slug' ? '/projects' : routeKey);
+    const loader = ROUTES[routeKey] || ROUTES['/home'];
     const mod = await loader();
     $('#app').innerHTML = '';
     try {
@@ -271,13 +289,11 @@ async function render() {
     } catch (e) {
       $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
     }
+    await renderLimitRail(routeKey);
+  } catch (e) {
+    console.warn('render failed', e);
   } finally {
     _rendering = false;
-  }
-  try {
-    await renderLimitRail(key);
-  } catch (e) {
-    console.warn('limit rail render failed', e);
   }
 }
 
