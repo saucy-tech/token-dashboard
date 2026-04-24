@@ -211,19 +211,27 @@ function setActiveTab(routeKey) {
   $$('header.topbar nav a').forEach(a => a.classList.toggle('active', a.dataset.route === routeKey));
 }
 
+let _rendering = false;
+let _sseTimer = null;
+
 async function render() {
-  const hash = location.hash.replace(/^#/, '') || '/overview';
-  const path = hash.split('?')[0];
-  let key = path;
-  if (path.startsWith('/sessions/')) key = '/sessions';
-  setActiveTab(key);
-  const loader = ROUTES[key] || ROUTES['/overview'];
-  const mod = await loader();
-  $('#app').innerHTML = '';
+  _rendering = true;
   try {
-    await mod.default($('#app'));
-  } catch (e) {
-    $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
+    const hash = location.hash.replace(/^#/, '') || '/overview';
+    const path = hash.split('?')[0];
+    let key = path;
+    if (path.startsWith('/sessions/')) key = '/sessions';
+    setActiveTab(key);
+    const loader = ROUTES[key] || ROUTES['/overview'];
+    const mod = await loader();
+    $('#app').innerHTML = '';
+    try {
+      await mod.default($('#app'));
+    } catch (e) {
+      $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
+    }
+  } finally {
+    _rendering = false;
   }
 }
 
@@ -275,13 +283,18 @@ async function boot() {
     }
   });
 
-  // SSE diff stream
+  // SSE diff stream — debounced 2 s to avoid thrashing on rapid scans
   try {
     const es = new EventSource('/api/stream');
     es.onmessage = ev => {
       try {
         const evt = JSON.parse(ev.data);
-        if (evt.type === 'scan') render();
+        if (evt.type !== 'scan') return;
+        if (_sseTimer) clearTimeout(_sseTimer);
+        _sseTimer = setTimeout(() => {
+          _sseTimer = null;
+          if (!_rendering) render();
+        }, 2000);
       } catch {}
     };
   } catch {}
