@@ -12,7 +12,14 @@ function promptCost(r) {
 export default async function (root) {
   const slug = decodeURIComponent(currentHashPath().split('/')[2] || '');
   if (!slug) {
-    root.innerHTML = '<div class="card"><h2>Project not found</h2><a href="#/projects">← Back to Projects</a></div>';
+    root.innerHTML = '<div class="card"><h2>Project not found</h2><a href="#/projects" data-back-projects>← Back to Projects</a></div>';
+    const back = root.querySelector('[data-back-projects]');
+    if (back) {
+      back.addEventListener('click', event => {
+        event.preventDefault();
+        location.hash = '#/projects';
+      });
+    }
     return;
   }
 
@@ -29,7 +36,7 @@ export default async function (root) {
       <h2 style="display:flex;align-items:center">
         <span>${fmt.htmlSafe(projectName)}</span>
         <span class="spacer"></span>
-        <a href="#/projects" class="muted">← Back to Projects</a>
+        <a href="#/projects" class="muted" data-back-projects>← Back to Projects</a>
       </h2>
       <p class="muted" title="${fmt.htmlSafe(slug)}">${fmt.htmlSafe(slug)}</p>
     </div>
@@ -80,4 +87,12 @@ export default async function (root) {
         </tbody>
       </table>
     </div>`;
+
+  const back = root.querySelector('[data-back-projects]');
+  if (back) {
+    back.addEventListener('click', event => {
+      event.preventDefault();
+      location.hash = '#/projects';
+    });
+  }
 }

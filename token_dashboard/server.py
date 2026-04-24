@@ -16,7 +16,7 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 from .db import (
-    overview_totals, expensive_prompts, project_summary,
+    overview_totals, expensive_prompts, recent_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, provider_breakdown, skill_breakdown,
     ensure_usage_snapshots, snapshot_rollups, snapshot_dimension_rows,
@@ -110,6 +110,14 @@ def _clamp_limit(raw, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, min(v, MAX_LIMIT))
+
+
+def _clamp_offset(raw, default: int = 0) -> int:
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, v)
 
 
 def _serve_static(handler, rel: str) -> None:
@@ -444,8 +452,15 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 return _send_error(self, 404, "unsupported export target")
             if path == "/api/prompts":
                 limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
+                offset = _clamp_offset(qs.get("offset", ["0"])[0], 0)
                 sort = qs.get("sort", ["tokens"])[0]
-                rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
+                rows = recent_prompts(
+                    db_path,
+                    limit=limit,
+                    sort=sort,
+                    provider=provider,
+                    offset=offset,
+                )
                 _attach_prompt_costs(rows, pricing)
                 return _send_json(self, rows)
             if path.startswith("/api/projects/") and path.endswith("/sessions"):
@@ -475,6 +490,7 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 return _send_json(self, recent_sessions(
                     db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
                     since=since, until=until, provider=provider,
+                    offset=_clamp_offset(qs.get("offset", ["0"])[0], 0),
                 ))
             if path == "/api/current-session":
                 settings = usage_limit_settings(db_path)
@@ -515,14 +531,13 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 sid = path.rsplit("/", 1)[1]
                 return _send_json(self, session_turns(db_path, sid))
             if path == "/api/tips":
-                return _send_json(self, all_tips(db_path))
+                if provider not in (None, "claude", "codex"):
+                    return _send_error(self, 400, "invalid provider")
+                return _send_json(self, all_tips(db_path, provider=provider))
             if path == "/api/plan":
                 return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
             if path == "/api/settings/usage-limits":
                 return _send_json(self, usage_limit_settings(db_path))
-            if path == "/api/scan":
-                n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
-                return _send_json(self, n)
             if path == "/api/stream":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -566,6 +581,9 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
             if url.path == "/api/settings/usage-limits":
                 settings = set_usage_limit_settings(db_path, body)
                 return _send_json(self, settings)
+            if url.path == "/api/scan":
+                n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
+                return _send_json(self, n)
             self.send_response(404)
             self.end_headers()
 

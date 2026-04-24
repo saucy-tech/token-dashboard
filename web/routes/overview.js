@@ -298,7 +298,7 @@ export default async function (root) {
   });
   root.querySelector('[data-scan-now]')?.addEventListener('click', async event => {
     event.currentTarget.textContent = 'Scanning...';
-    await api('/api/scan');
+    await api('/api/scan', { method: 'POST' });
     window.dispatchEvent(new Event('hashchange'));
   });
   root.querySelector('#save-weekly-budget')?.addEventListener('click', () => {

@@ -410,6 +410,7 @@ th {
 }
 tbody tr { transition: background 100ms; }
 tbody tr:hover { background: var(--panel-2); }
+tbody tr.selected { background: rgba(74, 158, 255, 0.14); }
 td.num, th.num {
   font-family: var(--mono); text-align: right;
   font-variant-numeric: tabular-nums;
