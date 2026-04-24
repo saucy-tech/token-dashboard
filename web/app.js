@@ -1,7 +1,26 @@
 // app.js — router, state, fetch helpers
 
+import {
+  currentWeekWindow,
+  limitForProvider,
+  loadUsageSettings,
+  progressPct,
+  sessionLimitSummary,
+  weeklyLimitSummary,
+} from '/web/limits.js';
+
 export const $  = (sel, root=document) => root.querySelector(sel);
 export const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+
+const PROVIDER_IDENTITY = {
+  all: { key: 'all', label: 'All providers', shortLabel: 'All', icon: 'ALL' },
+  claude: { key: 'claude', label: 'Claude Code', shortLabel: 'Claude', icon: 'CC' },
+  codex: { key: 'codex', label: 'Codex', shortLabel: 'Codex', icon: 'CX' },
+  warp: { key: 'warp', label: 'Warp', shortLabel: 'Warp', icon: 'WP' },
+  unknown: { key: 'unknown', label: 'Unknown', shortLabel: 'Unknown', icon: '--' },
+};
+const STATUS_WEIGHT = { ok: 0, caution: 1, near: 2, exceeded: 3 };
+const RAIL_ROUTES = new Set(['/overview', '/sessions', '/prompts']);
 
 const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 export const fmt = {
@@ -28,9 +47,10 @@ export const fmt = {
     return '';
   },
   providerLabel: p => {
-    const s = (p || '').toLowerCase();
-    if (!s) return 'Unknown';
-    return s[0].toUpperCase() + s.slice(1);
+    const raw = String(p || '').toLowerCase();
+    const meta = providerMeta(raw);
+    if (meta.key !== 'unknown' || !raw) return meta.label;
+    return raw[0].toUpperCase() + raw.slice(1);
   },
   sessionShort: s => {
     const raw = (s || '').includes(':') ? s.split(':').slice(1).join(':') : (s || '');
@@ -55,10 +75,23 @@ export async function optionalApi(path, fallback, opts) {
 export const state = { plan: 'api', pricing: null };
 export const PROVIDER_OPTIONS = [
   { key: 'all', label: 'All providers' },
-  { key: 'claude', label: 'Claude' },
+  { key: 'claude', label: 'Claude Code' },
   { key: 'codex', label: 'Codex' },
   { key: 'warp', label: 'Warp' },
 ];
+
+export function providerMeta(providerKey) {
+  const key = String(providerKey || '').toLowerCase();
+  return PROVIDER_IDENTITY[key] || PROVIDER_IDENTITY.unknown;
+}
+
+export function providerBadge(providerKey, opts = {}) {
+  const meta = providerMeta(providerKey);
+  const className = fmt.providerClass(meta.key);
+  const subtleClass = opts.subtle ? ' subtle' : '';
+  const label = opts.short ? meta.shortLabel : meta.label;
+  return `<span class="badge provider-badge ${className}${subtleClass}"><span class="provider-glyph">${meta.icon}</span>${fmt.htmlSafe(label)}</span>`;
+}
 
 export function currentHashPath() {
   return (location.hash.replace(/^#/, '').split('?')[0]) || '/overview';
@@ -89,7 +122,10 @@ export function providerTabs(activeKey) {
     <div class="range-tabs provider-tabs" role="tablist">
       ${PROVIDER_OPTIONS.map(p => `
         <button data-provider="${p.key}" class="${p.key === activeKey ? 'active' : ''}">
-          ${p.label}
+          <span class="provider-tab-chip ${fmt.providerClass(p.key)}">
+            <span class="provider-glyph">${providerMeta(p.key).icon}</span>
+            <span>${providerMeta(p.key).label}</span>
+          </span>
         </button>`).join('')}
     </div>`;
 }
@@ -205,6 +241,10 @@ function buildTopbar() {
     <span class="pill muted" title="Cmd/Ctrl+B blurs sensitive text">⌘B blur</span>
   `;
   document.body.prepend(wrap);
+  const rail = document.createElement('section');
+  rail.id = 'limit-rail';
+  rail.className = 'limit-rail limit-rail-hidden';
+  document.body.insertBefore(rail, document.getElementById('app'));
 }
 
 function setActiveTab(routeKey) {
@@ -225,6 +265,109 @@ async function render() {
   } catch (e) {
     $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
   }
+  try {
+    await renderLimitRail(key);
+  } catch (e) {
+    console.warn('limit rail render failed', e);
+  }
+}
+
+function railStatusClass(status) {
+  if (!status || status.pct == null) return 'ok';
+  if (status.cls === 'exceeded') return 'exceeded';
+  if (status.cls === 'near') return 'near';
+  if (status.cls === 'caution') return 'caution';
+  return 'ok';
+}
+
+function railSeverity(sessionStatus, weeklyStatus) {
+  const classes = [railStatusClass(sessionStatus), railStatusClass(weeklyStatus)];
+  return classes.reduce((best, current) => (
+    STATUS_WEIGHT[current] > STATUS_WEIGHT[best] ? current : best
+  ), 'ok');
+}
+
+function railPercent(status) {
+  if (!status || status.pct == null) return 'not set';
+  return `${progressPct(status)}%`;
+}
+
+function railResetLabel(resetAt) {
+  return resetAt.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+async function renderLimitRail(routeKey) {
+  const rail = $('#limit-rail');
+  if (!rail) return;
+  if (!RAIL_ROUTES.has(routeKey)) {
+    rail.className = 'limit-rail limit-rail-hidden';
+    rail.innerHTML = '';
+    return;
+  }
+  const provider = readProvider();
+  const usageSettings = await loadUsageSettings(api);
+  const limits = limitForProvider(usageSettings, provider.key);
+  const weekWindow = currentWeekWindow(new Date(), limits.weekStartDay);
+  const queryProvider = provider.key === 'all' ? null : provider.key;
+  const [currentSession, currentWeek] = await Promise.all([
+    api(withQuery('/api/current-session', { provider: queryProvider })),
+    api(withQuery('/api/overview', {
+      since: weekWindow.start.toISOString(),
+      until: weekWindow.reset.toISOString(),
+      provider: queryProvider,
+    })),
+  ]);
+  const activeSession = currentSession.session || null;
+  const sessionSummary = sessionLimitSummary(activeSession, limits);
+  const weeklySummary = weeklyLimitSummary(currentWeek, limits);
+  const providerInfo = providerMeta(provider.key);
+  const railClass = railSeverity(sessionSummary.status, weeklySummary.status);
+  const providerClass = fmt.providerClass(providerInfo.key);
+  const sessionHref = activeSession
+    ? '#/sessions/' + encodeURIComponent(activeSession.session_id) + (
+      provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key)
+    )
+    : '#/sessions' + (provider.key === 'all' ? '' : '?provider=' + encodeURIComponent(provider.key));
+  const activityHint = activeSession
+    ? (currentSession.freshness?.active ? 'active now' : 'latest scanned')
+    : 'no scanned session';
+  rail.className = `limit-rail status-${railClass} ${providerClass}`;
+  rail.innerHTML = `
+    <div class="limit-rail-inner">
+      <div class="rail-provider ${providerClass}">
+        <span class="provider-glyph">${providerInfo.icon}</span>
+        <div>
+          <div class="rail-label">Current provider</div>
+          <div class="rail-value">${fmt.htmlSafe(providerInfo.label)}</div>
+        </div>
+      </div>
+      <div class="rail-metric">
+        <div class="rail-label">Active session billable</div>
+        <div class="rail-value">${activeSession ? fmt.compact(sessionSummary.used) : '—'}</div>
+        <div class="rail-sub">${fmt.htmlSafe(activityHint)}</div>
+      </div>
+      <div class="rail-metric">
+        <div class="rail-label">Session limit</div>
+        <div class="rail-value">${railPercent(sessionSummary.status)}</div>
+      </div>
+      <div class="rail-metric">
+        <div class="rail-label">Weekly limit</div>
+        <div class="rail-value">${railPercent(weeklySummary.status)}</div>
+      </div>
+      <div class="rail-metric">
+        <div class="rail-label">Reset time</div>
+        <div class="rail-value">${fmt.htmlSafe(railResetLabel(weekWindow.reset))}</div>
+      </div>
+      <div class="rail-links">
+        <a href="${sessionHref}">${activeSession ? 'Open active session' : 'View sessions'}</a>
+        <a href="#/settings">Settings</a>
+      </div>
+    </div>`;
 }
 
 async function firstRun() {

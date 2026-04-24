@@ -4,6 +4,7 @@ import {
   fmt,
   optionalApi,
   providerTabs,
+  providerBadge,
   readHashParam,
   readProvider,
   state,
@@ -118,11 +119,11 @@ export default async function (root) {
       (p.cache_create_5m_tokens || 0) +
       (p.cache_create_1h_tokens || 0);
     return `
-      <div class="card">
+      <div class="card provider-surface ${fmt.providerClass(p.provider)}">
         <h3 style="display:flex;align-items:center">
           <span>${fmt.htmlSafe(fmt.providerLabel(p.provider))}</span>
           <span class="spacer"></span>
-          <span class="badge ${fmt.providerClass(p.provider)}">${fmt.htmlSafe(p.provider)}</span>
+          ${providerBadge(p.provider, { short: true })}
         </h3>
         <div class="flex muted" style="font-family:var(--mono);font-size:12px;justify-content:space-between">
           <span>${fmt.int(p.sessions)} sessions</span>

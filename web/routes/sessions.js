@@ -3,12 +3,26 @@ import {
   currentHashPath,
   exportHref,
   fmt,
+  providerBadge,
   providerTabs,
+  readHashParam,
   readProvider,
   withQuery,
   writeHashParams,
 } from '/web/app.js';
 import { limitForProvider, loadUsageSettings, sessionLimitSummary } from '/web/limits.js';
+
+const RISK_FILTERS = [
+  { key: 'all', label: 'All risk states' },
+  { key: 'near', label: 'Near limit' },
+  { key: 'exceeded', label: 'Exceeded' },
+];
+
+const SORTS = [
+  { key: 'recent', label: 'Most recent' },
+  { key: 'risk', label: 'Highest risk' },
+  { key: 'tokens', label: 'Most tokens' },
+];
 
 export default async function (root) {
   const id = decodeURIComponent(currentHashPath().split('/')[2] || '');
@@ -18,46 +32,83 @@ export default async function (root) {
 
 async function renderList(root) {
   const provider = readProvider();
+  const riskFilter = readRiskFilter();
+  const sort = readSort();
+  const settings = await loadUsageSettings(api);
   const exportParams = {
     limit: 100,
     provider: provider.key === 'all' ? null : provider.key,
   };
   const list = await api(withQuery('/api/sessions', exportParams));
+  const enriched = list.map(s => {
+    const limits = limitForProvider(settings, s.provider || provider.key || 'all');
+    const summary = sessionLimitSummary({ billable_tokens: s.tokens || 0 }, limits);
+    return { ...s, limits, risk: summary };
+  });
+  const filtered = enriched.filter(row => {
+    if (riskFilter.key === 'all') return true;
+    if (riskFilter.key === 'near') return row.risk.status.cls === 'near' || row.risk.status.cls === 'caution';
+    return row.risk.status.cls === 'exceeded';
+  });
+  const sorted = [...filtered].sort((a, b) => compareRows(a, b, sort.key));
   const selectedProvider = provider.key === 'all' ? 'all providers' : fmt.providerLabel(provider.key);
+  const filterTabs = `
+    <div class="range-tabs" role="tablist">
+      ${RISK_FILTERS.map(f => `<button data-risk-filter="${f.key}" class="${riskFilter.key === f.key ? 'active' : ''}">${f.label}</button>`).join('')}
+    </div>`;
+  const sortTabs = `
+    <div class="range-tabs" role="tablist">
+      ${SORTS.map(s => `<button data-sort="${s.key}" class="${sort.key === s.key ? 'active' : ''}">${s.label}</button>`).join('')}
+    </div>`;
   root.innerHTML = `
     <div class="card">
       <h2>Sessions</h2>
       <div class="flex" style="margin:-8px 0 12px;align-items:flex-start">
-        <p class="muted" style="margin:0">Showing ${fmt.htmlSafe(selectedProvider)}.</p>
+        <p class="muted" style="margin:0">Showing ${fmt.htmlSafe(selectedProvider)}. Limit risk is based on each session provider's effective threshold.</p>
         <span class="spacer"></span>
         <div class="export-actions">
           <a href="${exportHref('sessions', 'csv', exportParams)}" class="button-link">Export CSV</a>
           <a href="${exportHref('sessions', 'json', exportParams)}" class="button-link">Export JSON</a>
         </div>
       </div>
-      <div class="flex" style="margin:-4px 0 16px;justify-content:flex-end">
+      <div class="flex" style="margin:-4px 0 10px;justify-content:flex-end">
         ${providerTabs(provider.key)}
       </div>
+      <div class="flex" style="margin:0 0 16px;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        ${filterTabs}
+        ${sortTabs}
+      </div>
       <table>
-        <thead><tr><th>started</th><th>project</th><th>provider</th><th class="num">turns</th><th class="num">tokens</th><th>session</th></tr></thead>
+        <thead><tr><th>started</th><th>project</th><th>provider</th><th>limit risk</th><th class="num">turns</th><th class="num">tokens</th><th>session</th></tr></thead>
         <tbody>
-          ${list.map(s => `
-            <tr>
+          ${sorted.map(s => `
+            <tr class="provider-row ${fmt.providerClass(s.provider)}">
               <td class="mono">${fmt.ts(s.started)}</td>
               <td title="${fmt.htmlSafe(s.project_slug)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</td>
-              <td><span class="badge ${fmt.providerClass(s.provider)}">${fmt.htmlSafe(fmt.providerLabel(s.provider))}</span></td>
+              <td>${providerBadge(s.provider)}</td>
+              <td>${riskCell(s.risk)}</td>
               <td class="num">${fmt.int(s.turns)}</td>
               <td class="num">${fmt.int(s.tokens)}</td>
               <td><a href="${sessionHref(s.session_id, provider)}" class="mono">${fmt.htmlSafe(fmt.sessionShort(s.session_id))}</a></td>
             </tr>`).join('')}
-          ${list.length ? '' : '<tr><td colspan="6" class="muted">no sessions for this provider yet</td></tr>'}
+          ${sorted.length ? '' : '<tr><td colspan="7" class="muted">no sessions match this provider/risk filter yet</td></tr>'}
         </tbody>
       </table>
     </div>`;
 
-  root.querySelectorAll('.provider-tabs button').forEach(btn => {
+  root.querySelectorAll('.provider-tabs button, [data-risk-filter], [data-sort]').forEach(btn => {
     btn.addEventListener('click', () => {
-      writeHashParams({ provider: btn.dataset.provider === 'all' ? null : btn.dataset.provider });
+      if (btn.dataset.provider) {
+        writeHashParams({ provider: btn.dataset.provider === 'all' ? null : btn.dataset.provider });
+        return;
+      }
+      if (btn.dataset.riskFilter) {
+        writeHashParams({ risk: btn.dataset.riskFilter === 'all' ? null : btn.dataset.riskFilter });
+        return;
+      }
+      if (btn.dataset.sort) {
+        writeHashParams({ sort: btn.dataset.sort === 'recent' ? null : btn.dataset.sort });
+      }
     });
   });
 }
@@ -84,8 +135,17 @@ async function renderSession(root, id) {
   const settings = await loadUsageSettings(api);
   const limits = limitForProvider(settings, provider || 'all');
   const usage = sessionLimitSummary({ billable_tokens: billable }, limits);
-  const usagePct = usage.status.pct == null ? null : usage.pct;
+  const usagePct = usage.status.pct == null ? 0 : usage.pct;
   const usageClass = usage.status.cls === 'exceeded' ? 'over' : (usage.status.cls === 'near' || usage.status.cls === 'caution' ? 'near' : (usage.status.cls === 'normal' ? 'ok' : ''));
+  const limitDelta = limits.sessionTokens == null
+    ? null
+    : limits.sessionTokens - billable;
+  const deltaCopy = limitDelta == null
+    ? 'Set a session limit in Settings'
+    : (limitDelta < 0 ? `${fmt.compact(Math.abs(limitDelta))} over` : `${fmt.compact(limitDelta)} remaining`);
+  const sourceCopy = !limits.sessionTokens
+    ? 'Threshold source: not configured'
+    : `Threshold source: ${limits.providerOverride ? `${fmt.providerLabel(provider)} override` : 'global default'}`;
   const sessionLabel = (turns[0] && turns[0].session_label) || '';
   const backProvider = readProvider();
   const backHref = backProvider.key === 'all'
@@ -93,11 +153,11 @@ async function renderSession(root, id) {
     : '#/sessions?provider=' + encodeURIComponent(backProvider.key);
 
   root.innerHTML = `
-    <div class="card">
+    <div class="card provider-surface ${fmt.providerClass(provider)}">
       <h2 style="display:flex;align-items:center">
         <span>${fmt.htmlSafe(sessionLabel || ('Session ' + fmt.sessionShort(id)))}</span>
         <span class="spacer"></span>
-        ${provider ? `<span class="badge ${fmt.providerClass(provider)}">${fmt.htmlSafe(fmt.providerLabel(provider))}</span>` : ''}
+        ${provider ? providerBadge(provider) : ''}
         <a href="${backHref}" class="muted">← all sessions</a>
       </h2>
       <div class="flex muted" style="font-family:var(--mono);font-size:12px;flex-wrap:wrap;gap:14px">
@@ -108,15 +168,20 @@ async function renderSession(root, id) {
         <span>${fmt.int(totalIn)} in · ${fmt.int(totalOut)} out · ${fmt.int(totalCacheRd)} cache rd</span>
       </div>
       <div class="session-limit-strip ${usageClass}">
-        <div>
+        <div class="session-limit-main">
+          <span class="session-limit-kicker">Limit risk</span>
           <strong>${fmt.compact(billable)}</strong>
-          <span class="muted">billable tokens in this session</span>
+          <span class="muted">billable tokens</span>
         </div>
-        <div class="session-limit-meter" aria-label="session limit usage">
-          <span style="width:${usagePct == null ? 0 : usagePct}%"></span>
+        <div>
+          <div class="session-limit-meter" aria-label="session limit usage">
+            <span style="width:${usagePct}%"></span>
+          </div>
+          <div class="session-limit-meta">${limits.sessionTokens ? `${usagePct}% of ${fmt.compact(limits.sessionTokens)} limit` : 'No limit set'}</div>
         </div>
-        <div class="muted">
-          ${limits.sessionTokens ? `${usagePct}% of ${fmt.compact(limits.sessionTokens)} session limit` : '<a href="#/settings">Set session limit</a>'}
+        <div class="session-limit-delta">
+          <strong>${fmt.htmlSafe(deltaCopy)}</strong>
+          <span class="muted">${fmt.htmlSafe(sourceCopy)}</span>
         </div>
       </div>
     </div>
@@ -164,6 +229,55 @@ async function renderSession(root, id) {
       copyText(btn, turns[Number(btn.dataset.i)]?.prompt_text || '');
     });
   });
+}
+
+function readRiskFilter() {
+  const key = (readHashParam('risk') || 'all').toLowerCase();
+  return RISK_FILTERS.find(r => r.key === key) || RISK_FILTERS[0];
+}
+
+function readSort() {
+  const key = (readHashParam('sort') || 'recent').toLowerCase();
+  return SORTS.find(s => s.key === key) || SORTS[0];
+}
+
+function riskCell(risk) {
+  const cls = riskClass(risk.status?.cls);
+  const pct = risk.status?.pct == null ? 0 : risk.pct;
+  const label = risk.status?.name || 'Not set';
+  const sub = risk.status?.pct == null ? 'set a session limit' : `${pct}% used`;
+  return `
+    <div class="risk-cell ${cls}">
+      <div class="risk-label">${fmt.htmlSafe(label)}</div>
+      <div class="risk-meter"><span style="width:${pct}%"></span></div>
+      <div class="risk-sub">${fmt.htmlSafe(sub)}</div>
+    </div>`;
+}
+
+function riskClass(statusCls) {
+  if (statusCls === 'exceeded') return 'exceeded';
+  if (statusCls === 'near') return 'near';
+  if (statusCls === 'caution') return 'caution';
+  return 'normal';
+}
+
+function riskWeight(statusCls) {
+  if (statusCls === 'exceeded') return 3;
+  if (statusCls === 'near') return 2;
+  if (statusCls === 'caution') return 1;
+  return 0;
+}
+
+function compareRows(a, b, sortKey) {
+  if (sortKey === 'tokens') return (b.tokens || 0) - (a.tokens || 0);
+  if (sortKey === 'risk') {
+    const riskDiff = riskWeight(b.risk.status?.cls) - riskWeight(a.risk.status?.cls);
+    if (riskDiff) return riskDiff;
+    const pctDiff = (b.risk.pct || 0) - (a.risk.pct || 0);
+    if (pctDiff) return pctDiff;
+    return (b.tokens || 0) - (a.tokens || 0);
+  }
+  return String(b.started || '').localeCompare(String(a.started || ''));
 }
 
 function sessionHref(sessionId, provider) {
