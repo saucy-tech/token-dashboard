@@ -134,7 +134,7 @@ class ServerTests(unittest.TestCase):
     def test_export_prompts_csv(self):
         body = self._get("/api/export/prompts.csv?limit=10&provider=codex").decode("utf-8")
         self.assertIn("prompt_text", body)
-        self.assertIn("small", body)
+        self.assertIn("yo", body)
         self.assertIn("codex", body)
 
     def test_project_sessions_json(self):

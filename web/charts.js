@@ -30,9 +30,20 @@ const TOOLTIP = {
   padding: [8, 12],
 };
 
+const _resizeHandlers = new WeakMap();
+
 function mount(el) {
+  const existing = echarts.getInstanceByDom(el);
+  if (existing) {
+    const oldHandler = _resizeHandlers.get(el);
+    if (oldHandler) window.removeEventListener('resize', oldHandler);
+    _resizeHandlers.delete(el);
+    existing.dispose();
+  }
   const c = echarts.init(el, null, { renderer: 'svg' });
-  window.addEventListener('resize', () => c.resize());
+  const handler = () => c.resize();
+  _resizeHandlers.set(el, handler);
+  window.addEventListener('resize', handler);
   return c;
 }
 

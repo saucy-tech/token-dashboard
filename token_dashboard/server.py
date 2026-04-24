@@ -35,7 +35,19 @@ from .skills import cached_catalog
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
-EVENTS: "queue.Queue[dict]" = queue.Queue()
+EVENTS: "queue.Queue[dict]" = queue.Queue(maxsize=200)
+
+
+def _enqueue(evt: dict) -> None:
+    """Drop the oldest event rather than blocking when the queue is full."""
+    try:
+        EVENTS.put_nowait(evt)
+    except queue.Full:
+        try:
+            EVENTS.get_nowait()
+        except queue.Empty:
+            pass
+        EVENTS.put_nowait(evt)
 
 MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
@@ -565,9 +577,9 @@ def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None,
         try:
             n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
             if n["messages"] > 0:
-                EVENTS.put({"type": "scan", "n": n, "ts": time.time()})
+                _enqueue({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
-            EVENTS.put({"type": "error", "message": str(e)})
+            _enqueue({"type": "error", "message": str(e)})
         time.sleep(interval)
 
 

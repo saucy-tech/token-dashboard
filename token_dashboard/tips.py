@@ -4,10 +4,14 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from .db import connect
+from .pricing import load_pricing
+
+PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
 
 CORRECTION_RE = re.compile(
@@ -151,7 +155,7 @@ def dismiss_tip(db_path, key: str) -> None:
 
 
 def cache_discipline_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     sql = """
       SELECT project_slug,
@@ -182,7 +186,7 @@ def cache_discipline_tips(db_path, today_iso: Optional[str] = None) -> List[dict
 
 
 def repeated_target_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
@@ -240,7 +244,7 @@ def repeated_target_tips(db_path, today_iso: Optional[str] = None) -> List[dict]
 
 
 def right_size_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     sql = """
       SELECT COUNT(*) AS n,
@@ -255,8 +259,14 @@ def right_size_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
         row = c.execute(sql, (since,)).fetchone()
     if not row or (row["n"] or 0) < 10:
         return []
-    api_opus   = ((row["in_tok"] or 0) * 15 + (row["out_tok"] or 0) * 75) / 1_000_000
-    api_sonnet = ((row["in_tok"] or 0) *  3 + (row["out_tok"] or 0) * 15) / 1_000_000
+    pricing = load_pricing(PRICING_JSON)
+    opus_rates = next(
+        (v for v in pricing["models"].values() if v.get("tier") == "opus"),
+        pricing["tier_fallback"]["opus"],
+    )
+    sonnet_rates = pricing["tier_fallback"]["sonnet"]
+    api_opus   = ((row["in_tok"] or 0) * opus_rates["input"] + (row["out_tok"] or 0) * opus_rates["output"]) / 1_000_000
+    api_sonnet = ((row["in_tok"] or 0) * sonnet_rates["input"] + (row["out_tok"] or 0) * sonnet_rates["output"]) / 1_000_000
     savings = api_opus - api_sonnet
     if savings < 1.0:
         return []
@@ -272,7 +282,7 @@ def right_size_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
 
 
 def outlier_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
@@ -322,7 +332,7 @@ def outlier_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
 
 def expensive_pattern_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Group repeated expensive tool patterns so one noisy workflow is shown once."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
@@ -370,7 +380,7 @@ def expensive_pattern_tips(db_path, today_iso: Optional[str] = None) -> List[dic
 
 def doctor_edit_thrashing_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Doctor-style signal: one file edited repeatedly in a session."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
@@ -408,7 +418,7 @@ def doctor_edit_thrashing_tips(db_path, today_iso: Optional[str] = None) -> List
 
 def doctor_error_loop_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Doctor-style signal: 3+ consecutive tool errors in a session."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     seen = set()
@@ -463,7 +473,7 @@ def doctor_error_loop_tips(db_path, today_iso: Optional[str] = None) -> List[dic
 
 def doctor_exploration_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Doctor-style signal: high read-to-edit ratio or read-only wandering."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
@@ -519,7 +529,7 @@ def doctor_exploration_tips(db_path, today_iso: Optional[str] = None) -> List[di
 
 def doctor_abandonment_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Doctor-style signal: many short sessions for a project."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
@@ -585,7 +595,7 @@ def _session_message_groups(db_path, since: str) -> Tuple[Dict[str, List[dict]],
 
 def doctor_behavior_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Doctor-style user-behavior signals derived from prompt text."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     user_messages, assistant_counts = _session_message_groups(db_path, since)
     out = []
@@ -671,7 +681,7 @@ def doctor_behavior_tips(db_path, today_iso: Optional[str] = None) -> List[dict]
 
 def doctor_rapid_followup_tips(db_path, today_iso: Optional[str] = None) -> List[dict]:
     """Doctor-style signal: fast user follow-ups after assistant turns."""
-    today_iso = today_iso or datetime.utcnow().isoformat()
+    today_iso = today_iso or datetime.now(timezone.utc).isoformat()
     since = _iso_days_ago(today_iso, 7)
     out = []
     with connect(db_path) as c:
