@@ -1,11 +1,30 @@
-import { api, state, $ } from '/web/app.js';
+import { api, state, $, fmt } from '/web/app.js';
 
 export default async function (root) {
   const cur = await api('/api/plan');
   const plans = Object.entries(cur.pricing.plans);
+  let sourcesHtml = '';
+  try {
+    const src = await api('/api/sources');
+    sourcesHtml = `
+      <h3 style="margin-top:16px">Data sources</h3>
+      <p class="muted" style="margin:0 0 12px">Claude Code transcripts come from the projects directory. Codex is optional: set <code class="mono">CODEX_PROJECTS_DIR</code> to a JSONL root using the same layout, then restart the dashboard.</p>
+      <ul class="sources-strip-list">
+        ${src.sources.map(s => `
+          <li style="margin-bottom:12px">
+            <strong>${fmt.htmlSafe(s.label)}</strong>
+            <span class="muted"> — ${s.configured === false ? 'not configured' : !s.reachable ? 'path not found' : fmt.int(s.message_rows) + ' message rows'}</span>
+            ${s.projects_dir ? `<div class="mono muted" style="font-size:11px;margin-top:4px;word-break:break-all">${fmt.htmlSafe(s.projects_dir)}</div>` : ''}
+          </li>`).join('')}
+      </ul>
+      <hr class="divider">
+    `;
+  } catch (_) {}
+
   root.innerHTML = `
     <div class="card">
       <h2>Settings</h2>
+      ${sourcesHtml}
       <h3 style="margin-top:16px">Plan</h3>
       <p class="muted" style="margin:0 0 12px">Sets how cost is displayed. API mode shows pay-per-token rates. Subscription modes show what you actually pay each month.</p>
       <div class="flex">

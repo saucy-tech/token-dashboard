@@ -29,9 +29,19 @@ export async function api(path, opts) {
   return r.json();
 }
 
+/** Read a query param from the current hash, e.g. `#/overview?range=7d&source=claude`. */
+export function readQuery(key, def = '') {
+  const full = location.hash.replace(/^#/, '') || '';
+  const qi = full.indexOf('?');
+  if (qi < 0) return def;
+  const v = new URLSearchParams(full.slice(qi)).get(key);
+  return v == null || v === '' ? def : v;
+}
+
 export const state = { plan: 'api', pricing: null };
 
 const ROUTES = {
+  '/home':     () => import('/web/routes/home.js'),
   '/overview': () => import('/web/routes/overview.js'),
   '/prompts':  () => import('/web/routes/prompts.js'),
   '/sessions': () => import('/web/routes/sessions.js'),
@@ -61,12 +71,21 @@ function setActiveTab(routeKey) {
 }
 
 async function render() {
-  const hash = location.hash.replace(/^#/, '') || '/overview';
+  let hash = location.hash.replace(/^#/, '') || '/home';
+  const bare = hash.split('?')[0];
+  if (bare === '/claude') {
+    location.hash = '#/overview?source=claude';
+    return;
+  }
+  if (bare === '/codex') {
+    location.hash = '#/overview?source=codex';
+    return;
+  }
   const path = hash.split('?')[0];
   let key = path;
   if (path.startsWith('/sessions/')) key = '/sessions';
   setActiveTab(key);
-  const loader = ROUTES[key] || ROUTES['/overview'];
+  const loader = ROUTES[key] || ROUTES['/home'];
   const mod = await loader();
   $('#app').innerHTML = '';
   try {

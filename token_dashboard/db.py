@@ -1,7 +1,6 @@
 """SQLite schema, connection, and shared query helpers."""
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -40,13 +39,15 @@ CREATE TABLE IF NOT EXISTS messages (
   cache_create_1h_tokens  INTEGER NOT NULL DEFAULT 0,
   prompt_text             TEXT,
   prompt_chars            INTEGER,
-  tool_calls_json         TEXT
+  tool_calls_json         TEXT,
+  source                  TEXT NOT NULL DEFAULT 'claude'
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session   ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_project   ON messages(project_slug);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_model     ON messages(model);
 CREATE INDEX IF NOT EXISTS idx_messages_msgid     ON messages(session_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_source    ON messages(source);
 
 CREATE TABLE IF NOT EXISTS tool_calls (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,11 +58,13 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   target        TEXT,
   result_tokens INTEGER,
   is_error      INTEGER NOT NULL DEFAULT 0,
-  timestamp     TEXT    NOT NULL
+  timestamp     TEXT    NOT NULL,
+  source        TEXT NOT NULL DEFAULT 'claude'
 );
 CREATE INDEX IF NOT EXISTS idx_tools_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tools_name    ON tool_calls(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tools_target  ON tool_calls(target);
+CREATE INDEX IF NOT EXISTS idx_tools_source   ON tool_calls(source);
 
 CREATE TABLE IF NOT EXISTS plan (
   k TEXT PRIMARY KEY,
@@ -84,7 +87,27 @@ def init_db(path: Union[str, Path]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as c:
         _migrate_add_message_id(c)
+        # Before SCHEMA (indexes on `source`), add column on upgraded DBs.
+        _migrate_add_source(c)
         c.executescript(SCHEMA)
+
+
+def _migrate_add_source(conn) -> None:
+    """Add messages.source / tool_calls.source for Claude vs Codex (default claude)."""
+    for table in ("messages", "tool_calls"):
+        has = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if not has:
+            continue
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "source" in cols:
+            continue
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'claude'"
+        )
+    conn.commit()
 
 
 def _migrate_add_message_id(conn) -> None:
@@ -128,6 +151,30 @@ def _range_clause(since, until, col: str = "timestamp"):
     if until:
         where.append(f"{col} < ?"); args.append(until)
     return ((" AND " + " AND ".join(where)) if where else "", args)
+
+
+def normalize_source_param(source: Optional[str]) -> Optional[str]:
+    """None → no filter (all agents). ``all`` same. ``claude`` / ``codex`` only."""
+    if not source:
+        return None
+    s = str(source).strip().lower()
+    if s in ("", "all"):
+        return None
+    if s in ("claude", "codex"):
+        return s
+    return None
+
+
+def _msg_source_sql(alias: str, source: Optional[str]) -> tuple[str, list]:
+    if not source:
+        return "", []
+    return f" AND {alias}.source = ?", [source]
+
+
+def _tool_source_sql(source: Optional[str]) -> tuple[str, list]:
+    if not source:
+        return "", []
+    return " AND source = ?", [source]
 
 
 def _encode_slug(path: str) -> str:
@@ -186,29 +233,34 @@ def best_project_name(cwds, slug: str) -> str:
     return project_name_for(cwds[0] if cwds else None, slug)
 
 
-def overview_totals(db_path, since=None, until=None) -> dict:
+def overview_totals(db_path, since=None, until=None, source: Optional[str] = None) -> dict:
     rng, args = _range_clause(since, until)
+    src, sargs = _msg_source_sql("m", normalize_source_param(source))
     sql = f"""
-      SELECT COUNT(DISTINCT session_id) AS sessions,
-             SUM(CASE WHEN type='user' THEN 1 ELSE 0 END) AS turns,
-             COALESCE(SUM(input_tokens),0)            AS input_tokens,
-             COALESCE(SUM(output_tokens),0)           AS output_tokens,
-             COALESCE(SUM(cache_read_tokens),0)       AS cache_read_tokens,
-             COALESCE(SUM(cache_create_5m_tokens),0)  AS cache_create_5m_tokens,
-             COALESCE(SUM(cache_create_1h_tokens),0)  AS cache_create_1h_tokens
-        FROM messages WHERE 1=1 {rng}
+      SELECT COUNT(DISTINCT m.session_id) AS sessions,
+             SUM(CASE WHEN m.type='user' THEN 1 ELSE 0 END) AS turns,
+             COALESCE(SUM(m.input_tokens),0)            AS input_tokens,
+             COALESCE(SUM(m.output_tokens),0)           AS output_tokens,
+             COALESCE(SUM(m.cache_read_tokens),0)       AS cache_read_tokens,
+             COALESCE(SUM(m.cache_create_5m_tokens),0)  AS cache_create_5m_tokens,
+             COALESCE(SUM(m.cache_create_1h_tokens),0)  AS cache_create_1h_tokens
+        FROM messages m WHERE 1=1 {rng} {src}
     """
     with connect(db_path) as c:
-        return dict(c.execute(sql, args).fetchone())
+        return dict(c.execute(sql, [*args, *sargs]).fetchone())
 
 
-def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens") -> list:
+def expensive_prompts(
+    db_path, limit: int = 50, sort: str = "tokens", source: Optional[str] = None,
+) -> list:
     """User prompt joined with the immediately-following assistant turn's tokens.
 
     sort="tokens" (default) → largest billable first.
     sort="recent"           → newest first.
     """
     order = "u.timestamp DESC" if sort == "recent" else "billable_tokens DESC"
+    src = normalize_source_param(source)
+    src_sql, sargs = (" AND u.source = ? AND a.source = ?", [src, src]) if src else ("", [])
     sql = f"""
       SELECT u.uuid AS user_uuid, u.session_id, u.project_slug, u.timestamp,
              u.prompt_text, u.prompt_chars,
@@ -218,16 +270,18 @@ def expensive_prompts(db_path, limit: int = 50, sort: str = "tokens") -> list:
              COALESCE(a.cache_read_tokens,0) AS cache_read_tokens
         FROM messages u
         JOIN messages a ON a.parent_uuid = u.uuid AND a.type='assistant'
-       WHERE u.type='user' AND u.prompt_text IS NOT NULL
+       WHERE u.type='user' AND u.prompt_text IS NOT NULL {src_sql}
        ORDER BY {order}
        LIMIT ?
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, (limit,))]
+        return [dict(r) for r in c.execute(sql, (*sargs, limit))]
 
 
-def project_summary(db_path, since=None, until=None) -> list:
+def project_summary(db_path, since=None, until=None, source: Optional[str] = None) -> list:
     rng, args = _range_clause(since, until)
+    src = normalize_source_param(source)
+    src_sql, sargs = _msg_source_sql("m", src)
     sql = f"""
       SELECT project_slug,
              COUNT(DISTINCT session_id) AS sessions,
@@ -238,99 +292,108 @@ def project_summary(db_path, since=None, until=None) -> list:
                +SUM(cache_create_5m_tokens)+SUM(cache_create_1h_tokens) AS billable_tokens,
              SUM(cache_read_tokens) AS cache_read_tokens
         FROM messages m
-       WHERE 1=1 {rng}
+       WHERE 1=1 {rng} {src_sql}
        GROUP BY project_slug
        ORDER BY billable_tokens DESC
     """
     with connect(db_path) as c:
-        rows = [dict(r) for r in c.execute(sql, args)]
+        rows = [dict(r) for r in c.execute(sql, [*args, *sargs])]
+        cwd_src, cwd_args = _msg_source_sql("m", src)
         for r in rows:
             cwds = [row["cwd"] for row in c.execute(
-                "SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL",
-                (r["project_slug"],),
+                f"SELECT DISTINCT cwd FROM messages m WHERE project_slug=? AND cwd IS NOT NULL{cwd_src}",
+                (r["project_slug"], *cwd_args),
             )]
             r["project_name"] = best_project_name(cwds, r["project_slug"])
     return rows
 
 
-def tool_token_breakdown(db_path, since=None, until=None) -> list:
+def tool_token_breakdown(db_path, since=None, until=None, source: Optional[str] = None) -> list:
     rng, args = _range_clause(since, until)
+    src_sql, sargs = _tool_source_sql(normalize_source_param(source))
     sql = f"""
       SELECT tool_name,
              COUNT(*) AS calls,
              COALESCE(SUM(result_tokens),0) AS result_tokens
         FROM tool_calls
-       WHERE tool_name != '_tool_result' {rng}
+       WHERE tool_name != '_tool_result' {rng} {src_sql}
        GROUP BY tool_name
        ORDER BY calls DESC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, args)]
+        return [dict(r) for r in c.execute(sql, [*args, *sargs])]
 
 
-def recent_sessions(db_path, limit: int = 20, since=None, until=None) -> list:
+def recent_sessions(
+    db_path, limit: int = 20, since=None, until=None, source: Optional[str] = None,
+) -> list:
     rng, args = _range_clause(since, until)
+    src = normalize_source_param(source)
+    src_sql, sargs = _msg_source_sql("m", src)
     sql = f"""
       SELECT session_id, project_slug,
              MIN(timestamp) AS started, MAX(timestamp) AS ended,
              SUM(CASE WHEN type='user' THEN 1 ELSE 0 END) AS turns,
              SUM(input_tokens)+SUM(output_tokens) AS tokens
         FROM messages m
-       WHERE 1=1 {rng}
+       WHERE 1=1 {rng} {src_sql}
        GROUP BY session_id
        ORDER BY ended DESC
        LIMIT ?
     """
     with connect(db_path) as c:
-        rows = [dict(r) for r in c.execute(sql, (*args, limit))]
-        # Cache per-slug name lookups so we don't query once per session.
+        rows = [dict(r) for r in c.execute(sql, (*args, *sargs, limit))]
+        cwd_src, cwd_args = _msg_source_sql("m", src)
         slug_cache = {}
         for r in rows:
             slug = r["project_slug"]
             if slug not in slug_cache:
                 cwds = [row["cwd"] for row in c.execute(
-                    "SELECT DISTINCT cwd FROM messages WHERE project_slug=? AND cwd IS NOT NULL",
-                    (slug,),
+                    f"SELECT DISTINCT cwd FROM messages m WHERE project_slug=? AND cwd IS NOT NULL{cwd_src}",
+                    (slug, *cwd_args),
                 )]
                 slug_cache[slug] = best_project_name(cwds, slug)
             r["project_name"] = slug_cache[slug]
     return rows
 
 
-def session_turns(db_path, session_id: str) -> list:
-    sql = """
+def session_turns(db_path, session_id: str, source: Optional[str] = None) -> list:
+    src = normalize_source_param(source)
+    src_sql, sargs = _msg_source_sql("m", src)
+    sql = f"""
       SELECT uuid, parent_uuid, type, timestamp, model, is_sidechain, agent_id,
              input_tokens, output_tokens, cache_read_tokens,
              cache_create_5m_tokens, cache_create_1h_tokens,
              prompt_text, prompt_chars, tool_calls_json, project_slug, cwd
-        FROM messages
-       WHERE session_id = ?
-       ORDER BY timestamp ASC
+        FROM messages m
+       WHERE m.session_id = ? {src_sql}
+       ORDER BY m.timestamp ASC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, (session_id,))]
+        return [dict(r) for r in c.execute(sql, (session_id, *sargs))]
 
 
-def daily_token_breakdown(db_path, since=None, until=None) -> list:
+def daily_token_breakdown(db_path, since=None, until=None, source: Optional[str] = None) -> list:
     """One row per day: stacked bar data for input/output/cache_read/cache_create."""
     rng, args = _range_clause(since, until)
+    src_sql, sargs = _msg_source_sql("m", normalize_source_param(source))
     sql = f"""
-      SELECT substr(timestamp, 1, 10) AS day,
-             COALESCE(SUM(input_tokens),0)      AS input_tokens,
-             COALESCE(SUM(output_tokens),0)     AS output_tokens,
-             COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
-             COALESCE(SUM(cache_create_5m_tokens),0)
-               + COALESCE(SUM(cache_create_1h_tokens),0) AS cache_create_tokens
-        FROM messages
-       WHERE timestamp IS NOT NULL {rng}
+      SELECT substr(m.timestamp, 1, 10) AS day,
+             COALESCE(SUM(m.input_tokens),0)      AS input_tokens,
+             COALESCE(SUM(m.output_tokens),0)     AS output_tokens,
+             COALESCE(SUM(m.cache_read_tokens),0) AS cache_read_tokens,
+             COALESCE(SUM(m.cache_create_5m_tokens),0)
+               + COALESCE(SUM(m.cache_create_1h_tokens),0) AS cache_create_tokens
+        FROM messages m
+       WHERE m.timestamp IS NOT NULL {rng} {src_sql}
        GROUP BY day
        ORDER BY day ASC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, args)]
+        return [dict(r) for r in c.execute(sql, [*args, *sargs])]
 
 
-def skill_breakdown(db_path, since=None, until=None) -> list:
+def skill_breakdown(db_path, since=None, until=None, source: Optional[str] = None) -> list:
     """Per-skill invocation counts, distinct sessions, last-used timestamp.
 
     Token attribution per skill is not included: in Claude Code, a Skill's
@@ -342,35 +405,71 @@ def skill_breakdown(db_path, since=None, until=None) -> list:
     the reliable counts.
     """
     rng, args = _range_clause(since, until)
+    src_sql, sargs = _tool_source_sql(normalize_source_param(source))
     sql = f"""
       SELECT target AS skill,
              COUNT(*) AS invocations,
              COUNT(DISTINCT session_id) AS sessions,
              MAX(timestamp) AS last_used
         FROM tool_calls
-       WHERE tool_name = 'Skill' AND target IS NOT NULL AND target != '' {rng}
+       WHERE tool_name = 'Skill' AND target IS NOT NULL AND target != '' {rng} {src_sql}
        GROUP BY target
        ORDER BY invocations DESC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, args)]
+        return [dict(r) for r in c.execute(sql, [*args, *sargs])]
 
 
-def model_breakdown(db_path, since=None, until=None) -> list:
+def model_breakdown(db_path, since=None, until=None, source: Optional[str] = None) -> list:
     """Per-model token totals + turn count. Caller computes cost via pricing."""
     rng, args = _range_clause(since, until)
+    src_sql, sargs = _msg_source_sql("m", normalize_source_param(source))
     sql = f"""
       SELECT COALESCE(model, 'unknown') AS model,
              COUNT(*) AS turns,
-             COALESCE(SUM(input_tokens),0)            AS input_tokens,
-             COALESCE(SUM(output_tokens),0)           AS output_tokens,
-             COALESCE(SUM(cache_read_tokens),0)       AS cache_read_tokens,
-             COALESCE(SUM(cache_create_5m_tokens),0)  AS cache_create_5m_tokens,
-             COALESCE(SUM(cache_create_1h_tokens),0)  AS cache_create_1h_tokens
-        FROM messages
-       WHERE type = 'assistant' {rng}
+             COALESCE(SUM(m.input_tokens),0)            AS input_tokens,
+             COALESCE(SUM(m.output_tokens),0)           AS output_tokens,
+             COALESCE(SUM(m.cache_read_tokens),0)       AS cache_read_tokens,
+             COALESCE(SUM(m.cache_create_5m_tokens),0)  AS cache_create_5m_tokens,
+             COALESCE(SUM(m.cache_create_1h_tokens),0)  AS cache_create_1h_tokens
+        FROM messages m
+       WHERE m.type = 'assistant' {rng} {src_sql}
        GROUP BY model
-       ORDER BY (input_tokens + output_tokens + cache_create_5m_tokens + cache_create_1h_tokens) DESC
+       ORDER BY (SUM(m.input_tokens) + SUM(m.output_tokens) + SUM(m.cache_create_5m_tokens) + SUM(m.cache_create_1h_tokens)) DESC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, args)]
+        return [dict(r) for r in c.execute(sql, [*args, *sargs])]
+
+
+def sources_snapshot(db_path, claude_projects_dir: str, codex_projects_dir: Optional[str]) -> dict:
+    """Configured transcript roots + per-source row counts (for home / settings)."""
+    claude_path = Path(claude_projects_dir)
+    codex_raw = (codex_projects_dir or "").strip()
+    codex_path = Path(codex_raw) if codex_raw else None
+    with connect(db_path) as c:
+        claude_n = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE source='claude'",
+        ).fetchone()[0]
+        codex_n = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE source='codex'",
+        ).fetchone()[0]
+    return {
+        "sources": [
+            {
+                "id": "claude",
+                "label": "Claude Code",
+                "projects_dir": str(claude_path),
+                "configured": True,
+                "reachable": claude_path.is_dir(),
+                "message_rows": claude_n,
+            },
+            {
+                "id": "codex",
+                "label": "Codex",
+                "projects_dir": str(codex_path) if codex_path else "",
+                "configured": bool(codex_path),
+                "reachable": bool(codex_path and codex_path.is_dir()),
+                "message_rows": codex_n,
+            },
+        ],
+    }

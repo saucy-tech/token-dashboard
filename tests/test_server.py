@@ -63,6 +63,12 @@ class ServerTests(unittest.TestCase):
         self.assertIn("plan", body)
         self.assertIn("pricing", body)
 
+    def test_sources_json(self):
+        body = json.loads(self._get("/api/sources"))
+        self.assertIn("sources", body)
+        ids = {s["id"] for s in body["sources"]}
+        self.assertEqual(ids, {"claude", "codex"})
+
     def test_head_returns_200_not_501(self):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/", method="HEAD")
         with urllib.request.urlopen(req) as resp:

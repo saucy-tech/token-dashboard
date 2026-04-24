@@ -1,13 +1,26 @@
-import { api, fmt } from '/web/app.js';
+import { api, fmt, readQuery } from '/web/app.js';
+
+function apiWithSource(path) {
+  const s = readQuery('source', '').trim().toLowerCase();
+  if (s !== 'claude' && s !== 'codex') return path;
+  return path + (path.includes('?') ? '&' : '?') + 'source=' + encodeURIComponent(s);
+}
+
+function hashWithSource(baseHash) {
+  const s = readQuery('source', '').trim().toLowerCase();
+  if (s !== 'claude' && s !== 'codex') return baseHash;
+  return baseHash + (baseHash.includes('?') ? '&' : '?') + 'source=' + encodeURIComponent(s);
+}
 
 export default async function (root) {
-  const id = decodeURIComponent(location.hash.split('/')[2] || '');
+  const pathPart = (location.hash.replace(/^#/, '').split('?')[0] || '');
+  const id = decodeURIComponent(pathPart.split('/')[2] || '');
   if (!id) return renderList(root);
   return renderSession(root, id);
 }
 
 async function renderList(root) {
-  const list = await api('/api/sessions?limit=100');
+  const list = await api(apiWithSource('/api/sessions?limit=100'));
   root.innerHTML = `
     <div class="card">
       <h2>Sessions</h2>
@@ -20,7 +33,7 @@ async function renderList(root) {
               <td title="${fmt.htmlSafe(s.project_slug)}">${fmt.htmlSafe(s.project_name || s.project_slug)}</td>
               <td class="num">${fmt.int(s.turns)}</td>
               <td class="num">${fmt.int(s.tokens)}</td>
-              <td><a href="#/sessions/${encodeURIComponent(s.session_id)}" class="mono">${fmt.htmlSafe(s.session_id.slice(0,8))}…</a></td>
+              <td><a href="${hashWithSource('#/sessions/' + encodeURIComponent(s.session_id))}" class="mono">${fmt.htmlSafe(s.session_id.slice(0,8))}…</a></td>
             </tr>`).join('')}
         </tbody>
       </table>
@@ -28,7 +41,15 @@ async function renderList(root) {
 }
 
 async function renderSession(root, id) {
-  const turns = await api('/api/sessions/' + encodeURIComponent(id));
+  const turns = await api(apiWithSource('/api/sessions/' + encodeURIComponent(id)));
+  if (!turns.length) {
+    root.innerHTML = `
+      <div class="card">
+        <p class="muted">No rows for this session id (wrong id or source filter excludes it).</p>
+        <p><a href="${hashWithSource('#/sessions')}">← all sessions</a></p>
+      </div>`;
+    return;
+  }
   let totalIn = 0, totalOut = 0, totalCacheRd = 0;
   let modelCounts = {};
   for (const t of turns) {
@@ -51,7 +72,7 @@ async function renderSession(root, id) {
       <h2 style="display:flex;align-items:center">
         <span>Session ${fmt.htmlSafe(id.slice(0,8))}…</span>
         <span class="spacer"></span>
-        <a href="#/sessions" class="muted">← all sessions</a>
+        <a href="${hashWithSource('#/sessions')}" class="muted">← all sessions</a>
       </h2>
       <div class="flex muted" style="font-family:var(--mono);font-size:12px;flex-wrap:wrap;gap:14px">
         <span>${fmt.htmlSafe(project)}</span>

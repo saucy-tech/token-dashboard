@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from token_dashboard.db import init_db, default_db_path, overview_totals
-from token_dashboard.scanner import scan_dir
+from token_dashboard.scanner import scan_all
 from token_dashboard.tips import all_tips
 
 
@@ -24,6 +24,11 @@ def _projects(args) -> str:
     )
 
 
+def _codex_projects() -> str | None:
+    raw = (os.environ.get("CODEX_PROJECTS_DIR") or "").strip()
+    return raw or None
+
+
 def _today_range():
     now = datetime.now(timezone.utc)
     start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).isoformat()
@@ -34,7 +39,7 @@ def _today_range():
 def cmd_scan(args):
     db = _db_path(args)
     init_db(db)
-    n = scan_dir(_projects(args), db)
+    n = scan_all(_projects(args), db, _codex_projects())
     print(f"Token Dashboard: scanned {n['files']} files, {n['messages']} messages, {n['tools']} tool calls")
 
 
@@ -74,7 +79,7 @@ def cmd_dashboard(args):
     db = _db_path(args)
     init_db(db)
     if not args.no_scan:
-        scan_dir(_projects(args), db)
+        scan_all(_projects(args), db, _codex_projects())
     from token_dashboard.server import run
 
     host = os.environ.get("HOST", "127.0.0.1")
@@ -83,7 +88,7 @@ def cmd_dashboard(args):
     if not args.no_open:
         webbrowser.open(url)
     print(f"Token Dashboard listening on {url}")
-    run(host, port, db, _projects(args))
+    run(host, port, db, _projects(args), codex_projects_dir=_codex_projects())
 
 
 def main():
