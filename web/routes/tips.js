@@ -1,4 +1,4 @@
-import { api, fmt, providerTabs, readProvider, withQuery, writeHashParams } from '/web/app.js';
+import { api, fmt, providerBadge, providerTabs, readProvider, withQuery, writeHashParams } from '/web/app.js';
 
 export default async function (root) {
   const provider = readProvider();
@@ -19,7 +19,7 @@ export default async function (root) {
         <div class="tip" data-tip-key="${fmt.htmlSafe(t.key)}">
           <div class="tip-head">
             <span class="badge">${fmt.htmlSafe(t.category)}</span>
-            ${t.provider ? `<span class="badge ${fmt.providerClass(t.provider)}">${fmt.htmlSafe(fmt.providerLabel(t.provider))}</span>` : ''}
+            ${t.provider ? providerBadge(t.provider) : ''}
             ${t.signal ? `<span class="badge subtle">${fmt.htmlSafe(t.signal)}</span>` : ''}
             <strong>${fmt.htmlSafe(t.title)}</strong>
             <span class="spacer"></span>

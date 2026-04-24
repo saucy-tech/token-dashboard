@@ -1,6 +1,8 @@
 import {
   api,
   fmt,
+  providerBadge,
+  providerMeta,
   readHashParam,
   withQuery,
   writeHashParams,
@@ -15,8 +17,8 @@ const RANGES = [
 ];
 
 const PROVIDERS = [
-  { key: 'claude', label: 'Claude', color: '#F6B26B' },
-  { key: 'codex', label: 'Codex', color: '#6FD1C2' },
+  { key: 'claude', color: '#F6B26B' },
+  { key: 'codex', color: '#6FD1C2' },
 ];
 
 function readRange() {
@@ -155,11 +157,11 @@ export default async function (root) {
     </div>`;
 
   const providerCard = (provider, row, shareBase) => `
-    <div class="card provider-compare-card">
+    <div class="card provider-compare-card provider-surface ${fmt.providerClass(provider.key)}">
       <h3 style="display:flex;align-items:center">
-        <span>${provider.label}</span>
+        <span>${providerMeta(provider.key).label}</span>
         <span class="spacer"></span>
-        <span class="badge ${fmt.providerClass(provider.key)}">${provider.key}</span>
+        ${providerBadge(provider.key, { short: true })}
       </h3>
       <div class="provider-total" title="${fmt.int(billable(row))} billable tokens">${fmt.compact(billable(row))}</div>
       <div class="muted" style="font-size:12px;margin-top:2px">billable tokens &middot; ${pctOfTotal(billable(row), shareBase)} share</div>
@@ -264,16 +266,16 @@ export default async function (root) {
   groupedBarChart(document.getElementById('ch-daily-billable-provider'), {
     categories: days,
     series: [
-      { name: 'Claude', values: claudeDailyBillable, color: PROVIDERS[0].color },
-      { name: 'Codex', values: codexDailyBillable, color: PROVIDERS[1].color },
+      { name: providerMeta('claude').label, values: claudeDailyBillable, color: PROVIDERS[0].color },
+      { name: providerMeta('codex').label, values: codexDailyBillable, color: PROVIDERS[1].color },
     ],
   });
 
   groupedBarChart(document.getElementById('ch-daily-cache-provider'), {
     categories: days,
     series: [
-      { name: 'Claude', values: claudeCacheRead, color: PROVIDERS[0].color },
-      { name: 'Codex', values: codexCacheRead, color: PROVIDERS[1].color },
+      { name: providerMeta('claude').label, values: claudeCacheRead, color: PROVIDERS[0].color },
+      { name: providerMeta('codex').label, values: codexCacheRead, color: PROVIDERS[1].color },
     ],
   });
 

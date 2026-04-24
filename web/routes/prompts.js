@@ -2,6 +2,7 @@ import {
   api,
   exportHref,
   fmt,
+  providerBadge,
   providerTabs,
   readHashParam,
   readProvider,
@@ -121,11 +122,11 @@ export default async function (root) {
     if (!r) return;
     const drawer = document.getElementById('drawer');
     drawer.innerHTML = `
-        <div class="card">
+        <div class="card provider-surface ${fmt.providerClass(r.provider)}">
           <h3 style="display:flex;align-items:center">
             <span>Prompt detail</span>
             <span class="spacer"></span>
-            <span class="badge ${fmt.providerClass(r.provider)}">${fmt.htmlSafe(fmt.providerLabel(r.provider))}</span>
+            ${providerBadge(r.provider)}
             <span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span>
           </h3>
           <pre class="blur-sensitive">${fmt.htmlSafe(r.prompt_text || '')}</pre>
@@ -202,11 +203,11 @@ export default async function (root) {
 }
 
 function promptRow(r, index, sort, provider) {
-  return `<tr data-i="${index}" data-prompt="${fmt.htmlSafe(r.user_uuid)}" style="cursor:pointer">
+  return `<tr class="provider-row ${fmt.providerClass(r.provider)}" data-i="${index}" data-prompt="${fmt.htmlSafe(r.user_uuid)}" style="cursor:pointer">
     <td class="${sort.key === 'recent' ? 'mono' : 'num mono'}">${sort.key === 'recent' ? fmt.ts(r.timestamp) : promptCost(r)}</td>
     <td class="blur-sensitive">${fmt.htmlSafe(fmt.short(r.prompt_text, 110))}</td>
     <td>${fmt.htmlSafe(fmt.short(r.why_expensive || '', 90))}</td>
-    <td><span class="badge ${fmt.providerClass(r.provider)}">${fmt.htmlSafe(fmt.providerLabel(r.provider))}</span></td>
+    <td>${providerBadge(r.provider)}</td>
     <td><span class="badge ${fmt.modelClass(r.model)}">${fmt.htmlSafe(fmt.modelShort(r.model))}</span></td>
     <td class="num">${fmt.int(r.billable_tokens)}</td>
     <td class="num">${fmt.int(r.cache_read_tokens)}</td>
