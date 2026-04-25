@@ -157,6 +157,22 @@ def init_db(path: Union[str, Path]) -> None:
         c.commit()
 
 
+def health_check(path: Union[str, Path]) -> dict:
+    """Return lightweight DB health diagnostics for startup checks."""
+    db_path = Path(path)
+    if not db_path.exists():
+        return {"ok": True, "checks": {"exists": False, "quick_check": "not_run"}}
+    try:
+        with sqlite3.connect(db_path) as c:
+            row = c.execute("PRAGMA quick_check").fetchone()
+            result = (row[0] if row else "").strip().lower()
+            if result != "ok":
+                return {"ok": False, "checks": {"exists": True, "quick_check": result or "failed"}}
+    except sqlite3.DatabaseError as exc:
+        return {"ok": False, "checks": {"exists": True, "quick_check": "error", "error": str(exc)}}
+    return {"ok": True, "checks": {"exists": True, "quick_check": "ok"}}
+
+
 def _migrate_create_settings(conn) -> None:
     conn.execute("""
       CREATE TABLE IF NOT EXISTS settings (

@@ -45,15 +45,22 @@ _TARGET_FIELDS = {
 }
 
 
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _usage(rec: dict) -> dict:
     u = (rec.get("message") or {}).get("usage") or {}
     cc = u.get("cache_creation") or {}
     return {
-        "input_tokens": int(u.get("input_tokens") or 0),
-        "output_tokens": int(u.get("output_tokens") or 0),
-        "cache_read_tokens": int(u.get("cache_read_input_tokens") or 0),
-        "cache_create_5m_tokens": int(cc.get("ephemeral_5m_input_tokens") or 0),
-        "cache_create_1h_tokens": int(cc.get("ephemeral_1h_input_tokens") or 0),
+        "input_tokens": _safe_int(u.get("input_tokens")),
+        "output_tokens": _safe_int(u.get("output_tokens")),
+        "cache_read_tokens": _safe_int(u.get("cache_read_input_tokens")),
+        "cache_create_5m_tokens": _safe_int(cc.get("ephemeral_5m_input_tokens")),
+        "cache_create_1h_tokens": _safe_int(cc.get("ephemeral_1h_input_tokens")),
     }
 
 
@@ -181,6 +188,7 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
     """Incrementally ingest a Claude JSONL file."""
     msgs = tools = 0
     end_offset = start_byte
+    bytes_read = 0
     with open(path, "rb") as fb:
         if start_byte:
             fb.seek(start_byte)
@@ -188,6 +196,7 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
             raw = fb.readline()
             if not raw:
                 break
+            bytes_read += len(raw)
             if not raw.endswith(b"\n"):
                 break
             line_end = fb.tell()
@@ -220,17 +229,24 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
                 tools += 1
             msgs += 1
             end_offset = line_end
-    return {"messages": msgs, "tools": tools, "end_offset": end_offset}
+    return {
+        "messages": msgs,
+        "tools": tools,
+        "end_offset": end_offset,
+        "bytes_read": bytes_read,
+    }
 
 
 def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict:
     """Scan Claude project transcripts from ~/.claude/projects."""
     root = Path(projects_root)
-    totals = {"messages": 0, "tools": 0, "files": 0}
+    started = time.perf_counter()
+    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0}
     if not root.is_dir():
         return totals
     with connect(db_path) as conn:
         for p in root.rglob("*.jsonl"):
+            totals["files_seen"] += 1
             try:
                 stat = p.stat()
             except OSError:
@@ -250,8 +266,10 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
             )
             totals["messages"] += n["messages"]
             totals["tools"] += n["tools"]
+            totals["bytes_read"] += n["bytes_read"]
             totals["files"] += 1
         conn.commit()
+    totals["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return totals
 
 
@@ -260,17 +278,21 @@ def scan_sources(
     db_path: Union[str, Path],
     codex_home: Optional[Union[str, Path]] = None,
 ) -> dict:
-    totals = {"messages": 0, "tools": 0, "files": 0}
+    started = time.perf_counter()
+    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0}
+    providers = []
     if claude_projects_root:
-        n = scan_dir(claude_projects_root, db_path)
-        totals["messages"] += n["messages"]
-        totals["tools"] += n["tools"]
-        totals["files"] += n["files"]
+        providers.append(lambda: scan_dir(claude_projects_root, db_path))
     if codex_home:
-        n = scan_codex_home(codex_home, db_path)
+        providers.append(lambda: scan_codex_home(codex_home, db_path))
+    for scan_provider in providers:
+        n = scan_provider()
         totals["messages"] += n["messages"]
         totals["tools"] += n["tools"]
         totals["files"] += n["files"]
+        totals["files_seen"] += n.get("files_seen", 0)
+        totals["bytes_read"] += n.get("bytes_read", 0)
+    totals["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return totals
 
 
@@ -361,6 +383,10 @@ def _source_row(
 ) -> dict:
     cache = _provider_cache_counts(db_path, provider)
     scanned_files = _scanned_file_count(db_path, path)
+    last_scan_at = _last_scan_at(db_path, path)
+    now = time.time()
+    scan_age_seconds = None if last_scan_at is None else max(0, int(now - float(last_scan_at)))
+    stale_after_seconds = 15 * 60
     data_state = _source_data_state(status, log_files, scanned_files, cache)
     return {
         "provider": provider,
@@ -371,7 +397,10 @@ def _source_row(
         "connected": status == "connected",
         "log_files": log_files,
         "scanned_files": scanned_files,
-        "last_scan_at": _last_scan_at(db_path, path),
+        "last_scan_at": last_scan_at,
+        "scan_age_seconds": scan_age_seconds,
+        "stale_after_seconds": stale_after_seconds,
+        "stale": scan_age_seconds is not None and scan_age_seconds > stale_after_seconds,
         "cached_sessions": cache["sessions"],
         "cached_messages": cache["messages"],
         "hint": hint,
@@ -873,13 +902,15 @@ def _scan_codex_file(path: Path, conn, session_labels: Dict[str, str]) -> dict:
 def scan_codex_home(codex_home: Union[str, Path], db_path: Union[str, Path]) -> dict:
     """Scan Codex active + archived JSONL sessions from ~/.codex."""
     home = Path(codex_home)
-    totals = {"messages": 0, "tools": 0, "files": 0}
+    started = time.perf_counter()
+    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0}
     if not home.is_dir():
         return totals
 
     session_labels = _load_codex_session_labels(home)
     with connect(db_path) as conn:
         for path in _codex_candidate_paths(home):
+            totals["files_seen"] += 1
             try:
                 stat = path.stat()
             except OSError:
@@ -897,7 +928,9 @@ def scan_codex_home(codex_home: Union[str, Path], db_path: Union[str, Path]) -> 
             totals["messages"] += n["messages"]
             totals["tools"] += n["tools"]
             totals["files"] += 1
+            totals["bytes_read"] += stat.st_size
         conn.commit()
+    totals["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return totals
 
 

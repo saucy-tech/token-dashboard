@@ -76,6 +76,24 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(body["cost_estimated"])
         self.assertEqual(body["estimated_models"], 0)
 
+    def test_overview_json_schema_shape(self):
+        body = json.loads(self._get("/api/overview"))
+        expected = {
+            "sessions",
+            "turns",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_create_5m_tokens",
+            "cache_create_1h_tokens",
+            "cost_usd",
+            "cost_partial",
+            "cost_estimated",
+            "unpriced_models",
+            "estimated_models",
+        }
+        self.assertTrue(expected.issubset(set(body.keys())))
+
     def test_overview_json_can_filter_provider(self):
         body = json.loads(self._get("/api/overview?provider=codex"))
         self.assertEqual(body["sessions"], 1)
@@ -145,6 +163,26 @@ class ServerTests(unittest.TestCase):
         self.assertIn("estimated_cost_estimated", body[0])
         self.assertIn("estimated_cost_partial", body[0])
 
+    def test_prompts_json_schema_shape(self):
+        body = json.loads(self._get("/api/prompts?limit=10"))
+        expected = {
+            "user_uuid",
+            "assistant_uuid",
+            "session_id",
+            "project_slug",
+            "provider",
+            "model",
+            "prompt_text",
+            "billable_tokens",
+            "cache_read_tokens",
+            "estimated_cost_usd",
+            "estimated_cost_partial",
+            "estimated_cost_estimated",
+            "why_expensive",
+            "cost_drivers",
+        }
+        self.assertTrue(expected.issubset(set(body[0].keys())))
+
     def test_prompts_json_can_filter_provider(self):
         body = json.loads(self._get("/api/prompts?limit=10&provider=codex"))
         self.assertEqual(len(body), 1)
@@ -205,6 +243,43 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(body), 1)
         self.assertEqual(body[0]["session_id"], "s")
 
+    def test_sessions_json_schema_shape(self):
+        body = json.loads(self._get("/api/sessions?limit=1"))
+        expected = {
+            "session_id",
+            "project_slug",
+            "project_name",
+            "provider",
+            "started",
+            "ended",
+            "turns",
+            "tokens",
+            "billable_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_create_5m_tokens",
+            "cache_create_1h_tokens",
+            "primary_model",
+            "model_count",
+            "is_current",
+        }
+        self.assertTrue(expected.issubset(set(body[0].keys())))
+
+    def test_providers_json_schema_shape(self):
+        body = json.loads(self._get("/api/providers"))
+        expected = {
+            "provider",
+            "sessions",
+            "turns",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_create_5m_tokens",
+            "cache_create_1h_tokens",
+        }
+        self.assertTrue(expected.issubset(set(body[0].keys())))
+
     def test_sessions_json_clamps_negative_offset(self):
         body = json.loads(self._get("/api/sessions?limit=1&offset=-12"))
         self.assertEqual(len(body), 1)
@@ -222,6 +297,11 @@ class ServerTests(unittest.TestCase):
         body = self._get("/api/export/sessions.csv?provider=claude").decode("utf-8")
         self.assertIn("session_id", body)
         self.assertIn("s", body)
+
+    def test_export_version_endpoint(self):
+        body = json.loads(self._get("/api/export/version"))
+        self.assertEqual(body["version"], "v1")
+        self.assertEqual(body["format"], "token-dashboard-export")
 
     def test_plan_json(self):
         body = json.loads(self._get("/api/plan"))

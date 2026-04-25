@@ -30,6 +30,8 @@ class DataSourceStatusTests(unittest.TestCase):
         self.assertEqual(by_provider["claude"]["data_state"], "not_scanned")
         self.assertEqual(by_provider["claude"]["log_files"], 1)
         self.assertEqual(by_provider["claude"]["scanned_files"], 0)
+        self.assertIsNone(by_provider["claude"]["scan_age_seconds"])
+        self.assertFalse(by_provider["claude"]["stale"])
         self.assertEqual(by_provider["codex"]["status"], "missing")
         self.assertFalse(status["all_connected"])
         self.assertFalse(status["data_complete"])
@@ -76,6 +78,8 @@ class DataSourceStatusTests(unittest.TestCase):
         by_provider = {s["provider"]: s for s in status["sources"]}
         self.assertEqual(by_provider["claude"]["data_state"], "ready")
         self.assertEqual(by_provider["claude"]["scanned_files"], 1)
+        self.assertIsInstance(by_provider["claude"]["scan_age_seconds"], int)
+        self.assertIn("stale_after_seconds", by_provider["claude"])
         self.assertTrue(status["data_complete"])
 
     def test_disabled_source_with_cache_is_marked_cached_disabled(self):

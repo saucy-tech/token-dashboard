@@ -27,6 +27,9 @@ class WalkTests(unittest.TestCase):
         n = scan_dir(self.proj_root, self.db)
         self.assertEqual(n["messages"], 3)
         self.assertEqual(n["tools"], 2)  # 1 tool_use + 1 tool_result
+        self.assertIn("elapsed_ms", n)
+        self.assertIn("bytes_read", n)
+        self.assertGreaterEqual(n["files_seen"], 1)
         with sqlite3.connect(self.db) as c:
             row = c.execute("SELECT project_slug FROM messages WHERE uuid='u1'").fetchone()
         self.assertEqual(row[0], "C--work-sample")

@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from token_dashboard.db import init_db, connect, recent_prompts, recent_sessions
+from token_dashboard.db import init_db, connect, recent_prompts, recent_sessions, health_check
 
 
 class InitDbTests(unittest.TestCase):
@@ -29,6 +29,19 @@ class InitDbTests(unittest.TestCase):
         with connect(self.db_path) as c:
             r = c.execute("SELECT 1 AS one").fetchone()
         self.assertEqual(r["one"], 1)
+
+    def test_health_check_reports_ok_for_valid_db(self):
+        init_db(self.db_path)
+        status = health_check(self.db_path)
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["checks"]["quick_check"], "ok")
+
+    def test_health_check_flags_corrupt_db(self):
+        with open(self.db_path, "wb") as f:
+            f.write(b"not-a-sqlite-db")
+        status = health_check(self.db_path)
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["checks"]["quick_check"], "error")
 
 
 class OffsetQueryTests(unittest.TestCase):

@@ -47,6 +47,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("no suggestions", r.stdout)
 
+    def test_doctor_reports_health(self):
+        self._run("scan", "--projects-dir", self.proj)
+        r = self._run("doctor", "--projects-dir", self.proj)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("db_ok: True", r.stdout)
+        self.assertIn("pricing_models:", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

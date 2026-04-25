@@ -68,6 +68,34 @@ class SidechainTests(unittest.TestCase):
         self.assertEqual(tools[0]["tool_name"], "_tool_result")
         self.assertAlmostEqual(tools[0]["result_tokens"], 1000, delta=10)
 
+    def test_malformed_usage_values_fall_back_to_zero(self):
+        rec = {
+            "type": "assistant",
+            "uuid": "u3",
+            "sessionId": "s",
+            "timestamp": "t",
+            "isSidechain": False,
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": "nope",
+                    "output_tokens": None,
+                    "cache_read_input_tokens": {"bad": "shape"},
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": "bad",
+                        "ephemeral_1h_input_tokens": [],
+                    },
+                },
+            },
+        }
+        msg, tools = parse_record(rec, project_slug="p")
+        self.assertEqual(msg["input_tokens"], 0)
+        self.assertEqual(msg["output_tokens"], 0)
+        self.assertEqual(msg["cache_read_tokens"], 0)
+        self.assertEqual(msg["cache_create_5m_tokens"], 0)
+        self.assertEqual(msg["cache_create_1h_tokens"], 0)
+        self.assertEqual(tools, [])
+
 
 if __name__ == "__main__":
     unittest.main()

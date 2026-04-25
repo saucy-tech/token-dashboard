@@ -96,7 +96,15 @@ def scan_catalog(roots=None) -> Dict[str, dict]:
                 chars = md.stat().st_size
             except OSError:
                 continue
-            entry = {"path": str(md), "chars": chars, "tokens": chars // 4}
+            path_text = str(md)
+            source = "project_local"
+            if "/.claude/plugins/" in path_text:
+                source = "plugin"
+            elif "/.claude/scheduled-tasks/" in path_text:
+                source = "scheduled_task"
+            elif "/.claude/skills/" in path_text:
+                source = "global"
+            entry = {"path": path_text, "chars": chars, "tokens": chars // 4, "source": source}
             for slug in _slugs_for(md):
                 prev = catalog.get(slug)
                 if prev is None or len(md.parts) < len(Path(prev["path"]).parts):

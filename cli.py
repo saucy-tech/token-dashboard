@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Optional
 
 from token_dashboard.db import init_db, default_db_path, overview_totals
-from token_dashboard.scanner import default_codex_home, scan_sources
+from token_dashboard.db import health_check
+from token_dashboard.scanner import default_codex_home, scan_sources, data_source_status
+from token_dashboard.pricing import load_pricing
 from token_dashboard.tips import all_tips
 
 
@@ -42,7 +44,12 @@ def cmd_scan(args):
     db = _db_path(args)
     init_db(db)
     n = scan_sources(_projects(args), db, codex_home=_codex(args))
-    print(f"Token Dashboard: scanned {n['files']} files, {n['messages']} messages, {n['tools']} tool calls")
+    print(
+        "Token Dashboard: scanned "
+        f"{n['files']} files ({n.get('files_seen', 0)} seen), "
+        f"{n['messages']} messages, {n['tools']} tool calls, "
+        f"{n.get('bytes_read', 0)} bytes in {n.get('elapsed_ms', 0)}ms"
+    )
 
 
 def cmd_today(args):
@@ -93,6 +100,24 @@ def cmd_dashboard(args):
     run(host, port, db, _projects(args), codex_dir=_codex(args))
 
 
+def cmd_doctor(args):
+    db = _db_path(args)
+    init_db(db)
+    db_status = health_check(db)
+    sources = data_source_status(_projects(args), _codex(args), db)
+    pricing_path = Path(__file__).resolve().parent / "pricing.json"
+    pricing = load_pricing(pricing_path)
+    known_models = len((pricing.get("models") or {}).keys())
+
+    print("Token Dashboard doctor")
+    print(f"  db_ok: {db_status['ok']}")
+    print(f"  db_check: {db_status['checks'].get('quick_check')}")
+    print(f"  source_connected: {sources['all_connected']}")
+    print(f"  source_complete: {sources['data_complete']}")
+    print(f"  missing_sources: {', '.join(sources['missing']) if sources['missing'] else 'none'}")
+    print(f"  pricing_models: {known_models}")
+
+
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", help="SQLite path (default ~/.claude/token-dashboard.db)")
@@ -106,6 +131,7 @@ def main():
     sub.add_parser("today", parents=[common]).set_defaults(func=cmd_today)
     sub.add_parser("stats", parents=[common]).set_defaults(func=cmd_stats)
     sub.add_parser("tips",  parents=[common]).set_defaults(func=cmd_tips)
+    sub.add_parser("doctor", parents=[common]).set_defaults(func=cmd_doctor)
     d = sub.add_parser("dashboard", parents=[common])
     d.add_argument("--no-scan", action="store_true")
     d.add_argument("--no-open", action="store_true")

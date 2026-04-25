@@ -21,6 +21,7 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("frontend-design", cat)
         self.assertEqual(cat["frontend-design"]["chars"], 400)
         self.assertEqual(cat["frontend-design"]["tokens"], 100)
+        self.assertEqual(cat["frontend-design"]["source"], "project_local")
 
     def test_plugin_skill_registers_both_slugs(self):
         p = self.tmp / "plugins" / "marketplaces" / "official" / "plugins" / "superpowers" / "skills" / "brainstorming" / "SKILL.md"
@@ -30,6 +31,7 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("superpowers:brainstorming", cat)
         self.assertEqual(cat["brainstorming"]["tokens"], 200)
         self.assertEqual(cat["superpowers:brainstorming"]["tokens"], 200)
+        self.assertEqual(cat["brainstorming"]["source"], "project_local")
 
     def test_scheduled_task_skill(self):
         _write(self.tmp / "scheduled-tasks" / "morning-coffee" / "SKILL.md", "z" * 100)

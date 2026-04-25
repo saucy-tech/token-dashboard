@@ -23,6 +23,7 @@ from .db import (
     current_session,
     sessions_for_project, prompts_for_project,
     usage_limit_settings, set_usage_limit_settings,
+    health_check,
 )
 
 SLUG_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
@@ -420,6 +421,8 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 )
             if path.startswith("/api/export/"):
                 target = path[len("/api/export/"):]
+                if target == "version":
+                    return _send_json(self, {"version": "v1", "format": "token-dashboard-export"})
                 if "." not in target:
                     return _send_error(self, 404, "unsupported export target")
                 name, fmt = target.rsplit(".", 1)
@@ -515,6 +518,7 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
                 for r in rows:
                     info = catalog.get(r["skill"])
                     r["tokens_per_call"] = info["tokens"] if info else None
+                    r["tokens_source"] = info["source"] if info else "untracked"
                 return _send_json(self, rows)
             if path == "/api/by-model":
                 rows = model_breakdown(db_path, since, until, provider=provider)
@@ -602,6 +606,14 @@ def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None,
 
 
 def run(host: str, port: int, db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
+    db_status = health_check(db_path)
+    if not db_status.get("ok"):
+        check = db_status.get("checks", {}).get("quick_check", "failed")
+        raise RuntimeError(
+            "Database health check failed "
+            f"(quick_check={check}). "
+            "Move or delete the DB file and re-run scan to rebuild it from local logs."
+        )
     threading.Thread(target=_scan_loop, args=(db_path, projects_dir, codex_dir), daemon=True).start()
     H = build_handler(db_path, projects_dir, codex_dir=codex_dir)
     httpd = http.server.ThreadingHTTPServer((host, port), H)

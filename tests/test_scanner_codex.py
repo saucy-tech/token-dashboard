@@ -118,6 +118,8 @@ class CodexScannerTests(unittest.TestCase):
         n = scan_codex_home(self.codex_home, self.db)
         self.assertEqual(n["messages"], 2)
         self.assertEqual(n["tools"], 2)
+        self.assertIn("elapsed_ms", n)
+        self.assertGreaterEqual(n["bytes_read"], 1)
 
         with sqlite3.connect(self.db) as c:
             c.row_factory = sqlite3.Row
