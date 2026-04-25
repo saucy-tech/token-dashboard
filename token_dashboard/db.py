@@ -528,6 +528,7 @@ def current_session(db_path, provider: Optional[str] = None) -> Optional[dict]:
 
 DEFAULT_USAGE_LIMIT_SETTINGS = {
     "session_tokens": None,
+    "hourly_tokens": None,
     "weekly_tokens": None,
     "weekly_enabled": True,
     "week_start_day": 1,
@@ -535,8 +536,8 @@ DEFAULT_USAGE_LIMIT_SETTINGS = {
     "near_pct": 90,
     "active_session_window_minutes": 20,
     "providers": {
-        "claude": {"session_tokens": None, "weekly_tokens": None},
-        "codex": {"session_tokens": None, "weekly_tokens": None},
+        "claude": {"session_tokens": None, "hourly_tokens": None, "weekly_tokens": None},
+        "codex": {"session_tokens": None, "hourly_tokens": None, "weekly_tokens": None},
     },
 }
 
@@ -586,6 +587,7 @@ def _provider_limit_settings(raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     return {
         "session_tokens": _positive_int_or_none(raw.get("session_tokens")),
+        "hourly_tokens": _positive_int_or_none(raw.get("hourly_tokens")),
         "weekly_tokens": _positive_int_or_none(raw.get("weekly_tokens")),
     }
 
@@ -601,6 +603,7 @@ def _normalize_usage_limit_settings(raw: dict) -> dict:
     providers_raw = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
     return {
         "session_tokens": _positive_int_or_none(raw.get("session_tokens")),
+        "hourly_tokens": _positive_int_or_none(raw.get("hourly_tokens")),
         "weekly_tokens": _positive_int_or_none(raw.get("weekly_tokens")),
         "weekly_enabled": bool(raw.get("weekly_enabled", True)),
         "week_start_day": _bounded_int(raw.get("week_start_day"), 1, 0, 6),

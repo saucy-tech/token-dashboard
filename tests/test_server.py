@@ -250,6 +250,7 @@ class ServerTests(unittest.TestCase):
 
         saved = json.loads(self._post_json("/api/settings/usage-limits", {
             "session_tokens": 128000,
+            "hourly_tokens": 400000,
             "weekly_tokens": 1000000,
             "weekly_enabled": False,
             "week_start_day": 0,
@@ -257,19 +258,22 @@ class ServerTests(unittest.TestCase):
             "near_pct": 80,
             "active_session_window_minutes": 0,
             "providers": {
-                "claude": {"session_tokens": 200000, "weekly_tokens": 2000000},
-                "codex": {"session_tokens": -1, "weekly_tokens": 500000},
+                "claude": {"session_tokens": 200000, "hourly_tokens": 250000, "weekly_tokens": 2000000},
+                "codex": {"session_tokens": -1, "hourly_tokens": -1, "weekly_tokens": 500000},
             },
         }))
 
         self.assertEqual(saved["session_tokens"], 128000)
+        self.assertEqual(saved["hourly_tokens"], 400000)
         self.assertEqual(saved["weekly_tokens"], 1000000)
         self.assertFalse(saved["weekly_enabled"])
         self.assertEqual(saved["week_start_day"], 0)
         self.assertLess(saved["caution_pct"], saved["near_pct"])
         self.assertEqual(saved["active_session_window_minutes"], 1)
         self.assertEqual(saved["providers"]["claude"]["session_tokens"], 200000)
+        self.assertEqual(saved["providers"]["claude"]["hourly_tokens"], 250000)
         self.assertIsNone(saved["providers"]["codex"]["session_tokens"])
+        self.assertIsNone(saved["providers"]["codex"]["hourly_tokens"])
         self.assertEqual(saved["providers"]["codex"]["weekly_tokens"], 500000)
 
         reread = json.loads(self._get("/api/settings/usage-limits"))

@@ -21,6 +21,12 @@ export function currentWeekWindow(now = new Date(), weekStartDay = 1) {
   return { start, reset, weekStartDay: startDay };
 }
 
+export function rollingHourWindow(now = new Date()) {
+  const end = new Date(now);
+  const start = new Date(end.getTime() - 60 * 60 * 1000);
+  return { start, end };
+}
+
 export function limitStatus(used, limit, thresholds = { cautionPct: 75, nearPct: 90 }) {
   if (!limit) return { pct: null, cls: 'unset', label: 'not set', name: 'Not set' };
   const pct = used / limit;
@@ -43,9 +49,11 @@ export function limitForProvider(settings, providerKey = 'all') {
   const key = (providerKey || 'all').toLowerCase();
   const override = key === 'all' ? null : base.providers?.[key];
   const sessionTokens = override?.session_tokens || base.session_tokens || null;
+  const hourlyTokens = override?.hourly_tokens || base.hourly_tokens || null;
   const weeklyConfigured = override?.weekly_tokens || base.weekly_tokens || null;
   return {
     sessionTokens,
+    hourlyTokens,
     weeklyTokens: base.weekly_enabled ? weeklyConfigured : null,
     weeklyConfigured,
     weeklyEnabled: base.weekly_enabled,
@@ -53,7 +61,10 @@ export function limitForProvider(settings, providerKey = 'all') {
     cautionPct: base.caution_pct,
     nearPct: base.near_pct,
     activeSessionWindowMinutes: base.active_session_window_minutes,
-    providerOverride: Boolean(override?.session_tokens || override?.weekly_tokens),
+    sessionProviderOverride: Boolean(override?.session_tokens),
+    hourlyProviderOverride: Boolean(override?.hourly_tokens),
+    weeklyProviderOverride: Boolean(override?.weekly_tokens),
+    providerOverride: Boolean(override?.session_tokens || override?.hourly_tokens || override?.weekly_tokens),
   };
 }
 
@@ -67,6 +78,13 @@ export function weeklyLimitSummary(currentWeek, limits) {
   const used = billableTokens(currentWeek);
   const status = limitStatus(used, limits?.weeklyTokens || null, limits);
   const remaining = limits?.weeklyTokens == null ? null : Math.max(0, limits.weeklyTokens - used);
+  return { used, status, pct: progressPct(status), remaining };
+}
+
+export function hourlyLimitSummary(currentHour, limits) {
+  const used = billableTokens(currentHour);
+  const status = limitStatus(used, limits?.hourlyTokens || null, limits);
+  const remaining = limits?.hourlyTokens == null ? null : Math.max(0, limits.hourlyTokens - used);
   return { used, status, pct: progressPct(status), remaining };
 }
 
@@ -89,6 +107,7 @@ export function normalizeUsageSettings(raw = {}) {
   const providers = raw.providers || {};
   return {
     session_tokens: positiveInt(raw.session_tokens),
+    hourly_tokens: positiveInt(raw.hourly_tokens),
     weekly_tokens: positiveInt(raw.weekly_tokens),
     weekly_enabled: raw.weekly_enabled !== false,
     week_start_day: clampInt(raw.week_start_day, 1, 0, 6),
@@ -137,6 +156,7 @@ export function settingsFromLocalStorage(base = {}) {
 function normalizeProviderSettings(raw = {}) {
   return {
     session_tokens: positiveInt(raw.session_tokens),
+    hourly_tokens: positiveInt(raw.hourly_tokens),
     weekly_tokens: positiveInt(raw.weekly_tokens),
   };
 }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   billableTokens,
   currentWeekWindow,
+  hourlyLimitSummary,
   limitForProvider,
   limitStatus,
   progressPct,
@@ -64,29 +65,36 @@ assert.equal(window.weekStartDay, 1);
 
 const settings = {
   session_tokens: 1000,
+  hourly_tokens: 4000,
   weekly_tokens: 10000,
   weekly_enabled: true,
   caution_pct: 70,
   near_pct: 90,
   providers: {
-    claude: { session_tokens: 2000, weekly_tokens: 20000 },
-    codex: { session_tokens: null, weekly_tokens: 5000 },
+    claude: { session_tokens: 2000, hourly_tokens: 8000, weekly_tokens: 20000 },
+    codex: { session_tokens: null, hourly_tokens: 3000, weekly_tokens: 5000 },
   },
 };
 
 let limits = limitForProvider(settings, 'all');
 assert.equal(limits.sessionTokens, 1000);
+assert.equal(limits.hourlyTokens, 4000);
 assert.equal(limits.weeklyTokens, 10000);
 assert.equal(limits.providerOverride, false);
 
 limits = limitForProvider(settings, 'claude');
 assert.equal(limits.sessionTokens, 2000);
+assert.equal(limits.hourlyTokens, 8000);
 assert.equal(limits.weeklyTokens, 20000);
 assert.equal(limits.providerOverride, true);
+assert.equal(limits.sessionProviderOverride, true);
 
 limits = limitForProvider(settings, 'codex');
 assert.equal(limits.sessionTokens, 1000);
+assert.equal(limits.hourlyTokens, 3000);
 assert.equal(limits.weeklyTokens, 5000);
+assert.equal(limits.providerOverride, true);
+assert.equal(limits.sessionProviderOverride, false);
 
 const session = sessionLimitSummary({ billable_tokens: 950 }, limits);
 assert.equal(session.status.cls, 'near');
@@ -96,3 +104,8 @@ const week = weeklyLimitSummary({ input_tokens: 1000, output_tokens: 1500, cache
 assert.equal(week.used, 3000);
 assert.equal(week.remaining, 2000);
 assert.equal(week.status.cls, 'normal');
+
+const hour = hourlyLimitSummary({ input_tokens: 2600, output_tokens: 200, cache_create_5m_tokens: 200 }, limits);
+assert.equal(hour.used, 3000);
+assert.equal(hour.remaining, 0);
+assert.equal(hour.status.cls, 'exceeded');

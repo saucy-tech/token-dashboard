@@ -20,6 +20,7 @@ class UsageSettingsTests(unittest.TestCase):
     def test_usage_limit_settings_round_trip_and_validation(self):
         saved = set_usage_limit_settings(self.db, {
             "session_tokens": "128000",
+            "hourly_tokens": "400000",
             "weekly_tokens": "1000000",
             "weekly_enabled": False,
             "week_start_day": 8,
@@ -27,17 +28,20 @@ class UsageSettingsTests(unittest.TestCase):
             "near_pct": 80,
             "active_session_window_minutes": 0,
             "providers": {
-                "claude": {"session_tokens": 200000, "weekly_tokens": 3000000},
-                "codex": {"session_tokens": -1, "weekly_tokens": 500000},
+                "claude": {"session_tokens": 200000, "hourly_tokens": 250000, "weekly_tokens": 3000000},
+                "codex": {"session_tokens": -1, "hourly_tokens": -1, "weekly_tokens": 500000},
             },
         })
 
         self.assertEqual(saved["session_tokens"], 128000)
+        self.assertEqual(saved["hourly_tokens"], 400000)
         self.assertEqual(saved["weekly_tokens"], 1000000)
         self.assertFalse(saved["weekly_enabled"])
         self.assertEqual(saved["week_start_day"], 6)
         self.assertLess(saved["caution_pct"], saved["near_pct"])
         self.assertEqual(saved["active_session_window_minutes"], 1)
+        self.assertEqual(saved["providers"]["claude"]["hourly_tokens"], 250000)
+        self.assertIsNone(saved["providers"]["codex"]["hourly_tokens"])
         self.assertEqual(saved["providers"]["claude"]["weekly_tokens"], 3000000)
         self.assertIsNone(saved["providers"]["codex"]["session_tokens"])
         self.assertEqual(usage_limit_settings(self.db), saved)

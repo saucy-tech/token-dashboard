@@ -1,5 +1,4 @@
 // app.js — router, state, fetch helpers
-// PATCHED: added /limits route, /home + /limits to RAIL_ROUTES, SSE home-strip refresh
 
 import {
   currentWeekWindow,
@@ -23,9 +22,7 @@ const PROVIDER_IDENTITY = {
   unknown: { key: 'unknown', label: 'Unknown', shortLabel: 'Unknown', icon: '--' },
 };
 const STATUS_WEIGHT = { ok: 0, caution: 1, near: 2, exceeded: 3 };
-
-// PATCHED: added /home and /limits to RAIL_ROUTES
-const RAIL_ROUTES = new Set(['/home', '/overview', '/sessions', '/prompts', '/limits']);
+const RAIL_ROUTES = new Set(['/overview', '/sessions', '/prompts']);
 
 const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 export const fmt = {
@@ -106,6 +103,7 @@ export function readHashParam(key, fallback = null) {
   return params.get(key) ?? fallback;
 }
 
+/** Alias for hash query reads (legacy routes). */
 export function readQuery(key, def = '') {
   const v = readHashParam(key, null);
   return v == null || v === '' ? def : v;
@@ -226,7 +224,6 @@ export function exportHref(name, format, params = {}) {
   return withQuery(`/api/export/${name}.${format}`, params);
 }
 
-// PATCHED: added /limits route
 const ROUTES = {
   '/home': () => import('/web/routes/home.js'),
   '/overview': () => import('/web/routes/overview.js'),
@@ -237,7 +234,6 @@ const ROUTES = {
   '/projects/:slug': () => import('/web/routes/project-detail.js'),
   '/skills':   () => import('/web/routes/skills.js'),
   '/tips':     () => import('/web/routes/tips.js'),
-  '/limits':   () => import('/web/routes/limits.js'),
   '/settings': () => import('/web/routes/settings.js'),
 };
 
@@ -332,7 +328,6 @@ function railResetLabel(resetAt) {
   });
 }
 
-// PATCHED: extended rail to render a compact limits strip on /home
 async function renderLimitRail(routeKey) {
   const rail = $('#limit-rail');
   if (!rail) return;
@@ -341,13 +336,6 @@ async function renderLimitRail(routeKey) {
     rail.innerHTML = '';
     return;
   }
-
-  // On /home, render a compact 3-metric limits strip instead of the full session rail
-  if (routeKey === '/home') {
-    await renderHomeLimitStrip(rail);
-    return;
-  }
-
   const provider = readProvider();
   const usageSettings = await loadUsageSettings(api);
   const limits = limitForProvider(usageSettings, provider.key);
@@ -416,71 +404,9 @@ async function renderLimitRail(routeKey) {
       </div>
       <div class="rail-links">
         <a href="${sessionHref}">${activeSession ? 'Open active session' : 'View sessions'}</a>
-        <a href="#/limits">Limits →</a>
         <a href="#/settings">Settings</a>
       </div>
     </div>`;
-}
-
-// PATCHED: compact limits strip for /home (CodexBar MetricRow style)
-async function renderHomeLimitStrip(rail) {
-  try {
-    const usageSettings = await loadUsageSettings(api);
-    const limits = limitForProvider(usageSettings, 'all');
-    const hourWindow = rollingHourWindow(new Date());
-    const weekWindow = currentWeekWindow(new Date(), limits.weekStartDay);
-    const [session, hourData, weekData] = await Promise.all([
-      api('/api/current-session'),
-      api(withQuery('/api/overview', { since: hourWindow.start.toISOString(), until: hourWindow.end.toISOString() })),
-      api(withQuery('/api/overview', { since: weekWindow.start.toISOString(), until: weekWindow.reset.toISOString() })),
-    ]);
-    const sessSummary  = sessionLimitSummary(session.session || null, limits);
-    const hourSummary  = hourlyLimitSummary(hourData, limits);
-    const weekSummary  = weeklyLimitSummary(weekData, limits);
-    const showUsed     = localStorage.getItem('td.limits-show-used') !== '0';
-
-    function metricCell(label, summary, resetLabel, color) {
-      const pct = progressPct(summary.status);
-      const statCls = summary.status.cls || 'normal';
-      const statColor = statCls === 'exceeded' ? 'var(--bad)' : statCls === 'near' ? 'var(--warn)' : color;
-      const pctLabel = showUsed ? `${pct}% used` : `${100 - pct}% left`;
-      return `
-        <div class="home-limit-cell">
-          <div class="home-limit-label">${label}</div>
-          <div class="home-limit-bar">
-            <div class="home-limit-fill" style="width:${pct}%;background:${statColor};"></div>
-          </div>
-          <div class="home-limit-detail">
-            <span style="color:${statColor};font-weight:600;">${pctLabel}</span>
-            <span class="home-limit-reset">${fmt.htmlSafe(resetLabel)}</span>
-          </div>
-        </div>`;
-    }
-
-    const now = new Date();
-    const nextHour = new Date(now); nextHour.setMinutes(0,0,0); nextHour.setHours(nextHour.getHours()+1);
-    const daysToMon = (8-now.getDay())%7||7;
-    const nextMon = new Date(now); nextMon.setDate(nextMon.getDate()+daysToMon); nextMon.setHours(0,0,0,0);
-    const hmsMs = nextHour - now;
-    const mm = String(Math.floor((hmsMs%3600000)/60000)).padStart(2,'0');
-    const ss = String(Math.floor((hmsMs%60000)/1000)).padStart(2,'0');
-    const wd = Math.floor((nextMon-now)/86400000);
-    const wh = Math.floor(((nextMon-now)%86400000)/3600000);
-
-    rail.className = `limit-rail home-limit-rail`;
-    rail.innerHTML = `
-      <div class="home-limit-strip">
-        ${limits.sessionTokens ? metricCell('Session', sessSummary, 'ends w/ session', '#3FB68B') : ''}
-        ${limits.hourlyTokens  ? metricCell('Hourly',  hourSummary,  `↺ ${mm}:${ss}`,           '#E8A23B') : ''}
-        ${limits.weeklyTokens  ? metricCell('Weekly',  weekSummary,  `↺ ${wd}d ${wh}h`,         '#4A9EFF') : ''}
-        <div class="home-limit-cell home-limit-links">
-          <a href="#/limits" style="color:var(--accent);font-size:12px;">Full limits →</a>
-          <a href="#/settings" style="color:var(--muted);font-size:11px;">Configure</a>
-        </div>
-      </div>`;
-  } catch {
-    rail.className = 'limit-rail limit-rail-hidden';
-  }
 }
 
 async function firstRun() {
@@ -531,7 +457,7 @@ async function boot() {
     }
   });
 
-  // PATCHED: SSE — on scan, refresh limit rail without full page reload when possible
+  // SSE diff stream — debounced 2 s to avoid thrashing on rapid scans
   try {
     const es = new EventSource('/api/stream');
     es.onmessage = ev => {
@@ -539,20 +465,9 @@ async function boot() {
         const evt = JSON.parse(ev.data);
         if (evt.type !== 'scan') return;
         if (_sseTimer) clearTimeout(_sseTimer);
-        _sseTimer = setTimeout(async () => {
+        _sseTimer = setTimeout(() => {
           _sseTimer = null;
-          if (_rendering) return;
-          const routeKey = currentHashPath().startsWith('/sessions/') ? '/sessions'
-            : currentHashPath().startsWith('/projects/') ? '/projects/:slug'
-            : currentHashPath();
-          // Refresh limit rail silently on all RAIL_ROUTES without a full re-render
-          if (RAIL_ROUTES.has(routeKey)) {
-            await renderLimitRail(routeKey).catch(() => {});
-          }
-          // Full re-render only on non-limits routes (limits route manages its own refresh)
-          if (routeKey !== '/limits') {
-            render();
-          }
+          if (!_rendering) render();
         }, 2000);
       } catch {}
     };

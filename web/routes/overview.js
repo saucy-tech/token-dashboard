@@ -15,9 +15,11 @@ import { barChart, donutChart, groupedBarChart, lineChart, stackedBarChart } fro
 import {
   billableTokens,
   currentWeekWindow,
+  hourlyLimitSummary,
   limitForProvider,
   loadUsageSettings,
   progressPct,
+  rollingHourWindow,
   sessionLimitSummary,
   warningLabel,
   weeklyLimitSummary,
@@ -75,15 +77,22 @@ export default async function (root) {
   const weeklyBudget = readWeeklyBudget();
   const usageSettings = await loadUsageSettings(api);
   const usageLimits = limitForProvider(usageSettings, provider.key);
+  const hourWindow = rollingHourWindow(new Date());
   const weekWindow = currentWeekWindow(new Date(), usageLimits.weekStartDay);
+  const hourParams = {
+    since: hourWindow.start.toISOString(),
+    until: hourWindow.end.toISOString(),
+    provider: provider.key === 'all' ? null : provider.key,
+  };
   const weekParams = {
     since: weekWindow.start.toISOString(),
     until: weekWindow.reset.toISOString(),
     provider: provider.key === 'all' ? null : provider.key,
   };
 
-  const [totals, currentWeek, trends, projects, sessions, currentSession, tools, daily, byModel, providers, sources] = await Promise.all([
+  const [totals, currentHour, currentWeek, trends, projects, sessions, currentSession, tools, daily, byModel, providers, sources] = await Promise.all([
     api(withQuery('/api/overview', params)),
+    api(withQuery('/api/overview', hourParams)),
     api(withQuery('/api/overview', weekParams)),
     api(withQuery('/api/trends', {
       provider: provider.key === 'all' ? null : provider.key,
@@ -176,6 +185,8 @@ export default async function (root) {
 
     ${usageLimitsSection({
       latestSession: currentSession.session ? { ...currentSession.session, _freshness: currentSession.freshness } : null,
+      currentHour,
+      hourWindow,
       currentWeek,
       weekWindow,
       trendWeeks,
@@ -482,10 +493,14 @@ function shortWeekLabel(dateStr) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks, budget, limits, provider, sources }) {
+function usageLimitsSection({ latestSession, currentHour, hourWindow, currentWeek, weekWindow, trendWeeks, budget, limits, provider, sources }) {
   const sessionSummary = sessionLimitSummary(latestSession, limits);
   const currentTokens = sessionSummary.used;
   const currentStatus = sessionSummary.status;
+  const hourlySummary = hourlyLimitSummary(currentHour, limits);
+  const hourlyTokens = hourlySummary.used;
+  const hourlyStatus = hourlySummary.status;
+  const hourlyRemaining = hourlySummary.remaining;
   const weeklySummary = weeklyLimitSummary(currentWeek, limits);
   const weeklyTokens = weeklySummary.used;
   const weeklyStatus = weeklySummary.status;
@@ -508,10 +523,14 @@ function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks
   const sessionMeta = latestSession
     ? `${fmt.providerLabel(latestSession.provider)} · started ${fmt.ts(latestSession.started_at || latestSession.started)}`
     : 'no scanned session';
+  const hourMeta = `${fmt.ts(hourWindow.start.toISOString())} to ${fmt.ts(hourWindow.end.toISOString())}`;
   const weekMeta = `${fmt.ts(weekWindow.start.toISOString())} to ${reset}`;
+  const hourlyUsedLabel = limits.hourlyTokens ? `${progressPct(hourlyStatus)}%` : '—';
+  const hourlyRemainingLabel = hourlyRemaining == null ? '—' : fmt.compact(hourlyRemaining);
   const weeklyUsedLabel = limits.weeklyTokens ? `${progressPct(weeklyStatus)}%` : '—';
   const remainingLabel = remainingTokens == null ? '—' : fmt.compact(remainingTokens);
-  const warningText = warningLabel(weeklyStatus, remainingTokens == null ? null : fmt.compact(remainingTokens), 'Weekly');
+  const hourlyWarningText = warningLabel(hourlyStatus, hourlyRemaining == null ? null : fmt.compact(hourlyRemaining), 'Hourly');
+  const weeklyWarningText = warningLabel(weeklyStatus, remainingTokens == null ? null : fmt.compact(remainingTokens), 'Weekly');
   const freshness = latestSession?._freshness || {};
   const latestLabel = freshness.active ? 'Latest scanned session (active)' : 'Latest scanned session';
   const staleText = freshness.stale && latestSession
@@ -537,6 +556,14 @@ function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks
           emptyText: limits.sessionTokens ? 'no scanned session usage yet' : 'set a session token threshold',
         })}
         ${usageProgressRow({
+          label: 'Rolling hour',
+          used: hourlyTokens,
+          limit: limits.hourlyTokens,
+          status: hourlyStatus,
+          meta: hourMeta,
+          emptyText: limits.hourlyTokens ? 'no scanned usage in the last hour' : 'set an hourly token threshold',
+        })}
+        ${usageProgressRow({
           label: 'Current week',
           used: weeklyTokens,
           limit: limits.weeklyTokens,
@@ -547,13 +574,16 @@ function usageLimitsSection({ latestSession, currentWeek, weekWindow, trendWeeks
       </div>
 
       <div class="limit-metrics">
+        ${usageMetric('Hourly used', hourlyUsedLabel, limits.hourlyTokens ? `${fmt.compact(hourlyTokens)} consumed` : 'set hourly token limit', hourlyStatus.cls)}
+        ${usageMetric('Hourly left', hourlyRemainingLabel, hourlyRemaining == null ? 'hourly limit not set' : 'tokens available', hourlyRemaining === 0 && limits.hourlyTokens ? 'exceeded' : 'normal')}
         ${usageMetric('Weekly used', weeklyUsedLabel, limits.weeklyTokens ? `${fmt.compact(weeklyTokens)} consumed` : (limits.weeklyEnabled ? 'set weekly token limit' : 'limit disabled'), weeklyStatus.cls)}
         ${usageMetric('Remaining', remainingLabel, remainingTokens == null ? (limits.weeklyEnabled ? 'weekly limit not set' : 'limit disabled') : 'tokens available', remainingTokens === 0 && limits.weeklyTokens ? 'exceeded' : 'normal')}
         ${usageMetric('Reset', reset, 'local time')}
         ${usageMetric('Last scan', lastScanLabel, partial ? 'partial source coverage' : 'source status current', partial ? 'caution' : 'normal')}
       </div>
 
-      ${warningText ? `<div class="limit-warning ${weeklyStatus.cls}">${fmt.htmlSafe(warningText)}</div>` : ''}
+      ${hourlyWarningText ? `<div class="limit-warning ${hourlyStatus.cls}">${fmt.htmlSafe(hourlyWarningText)}</div>` : ''}
+      ${weeklyWarningText ? `<div class="limit-warning ${weeklyStatus.cls}">${fmt.htmlSafe(weeklyWarningText)}</div>` : ''}
       ${partial ? `<div class="limit-warning coverage">Data coverage may be incomplete, so remaining usage can be optimistic.</div>` : ''}
       ${staleText ? `<div class="limit-warning stale">${fmt.htmlSafe(staleText)}</div>` : ''}
 
