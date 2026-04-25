@@ -68,6 +68,18 @@ class UsageSettingsTests(unittest.TestCase):
         self.assertEqual(totals["sessions"], 1)
         self.assertEqual(totals["input_tokens"], 20)
 
+    def test_thresholds_are_clamped_and_ordered_at_extremes(self):
+        saved = set_usage_limit_settings(self.db, {
+            "caution_pct": 200,
+            "near_pct": -5,
+            "active_session_window_minutes": 99999,
+            "week_start_day": -3,
+        })
+        self.assertEqual(saved["caution_pct"], 98)
+        self.assertEqual(saved["near_pct"], 99)
+        self.assertEqual(saved["active_session_window_minutes"], 1440)
+        self.assertEqual(saved["week_start_day"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

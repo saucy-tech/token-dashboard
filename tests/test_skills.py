@@ -69,6 +69,18 @@ class CatalogTests(unittest.TestCase):
         cat = scan_catalog([self.tmp / "skills"])
         self.assertNotIn("never-installed", cat)
 
+    def test_scan_catalog_includes_project_local_skill_roots(self):
+        prev_cwd = Path.cwd()
+        project_root = self.tmp / "repo"
+        try:
+            (project_root / ".claude" / "skills" / "local-only").mkdir(parents=True)
+            _write(project_root / ".claude" / "skills" / "local-only" / "SKILL.md", "a" * 80)
+            os.chdir(project_root)
+            cat = scan_catalog()
+        finally:
+            os.chdir(prev_cwd)
+        self.assertIn("local-only", cat)
+
 
 if __name__ == "__main__":
     unittest.main()

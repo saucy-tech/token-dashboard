@@ -26,7 +26,7 @@ Session and weekly limits are stored in the local SQLite database and shown agai
 
 ## Non-standard model names get tier-fallback pricing
 
-If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), Claude cost is estimated from the tier substring (`opus` / `sonnet` / `haiku`) in the name. Overview and model APIs mark these as estimated. Unknown Codex/OpenAI model names do not have a tier fallback yet, so their cost is reported as null.
+If a transcript references a model ID not in `pricing.json` (e.g. a future snapshot that isn't in our table yet), cost is estimated from known family substrings in the model name. Claude (`opus` / `sonnet` / `haiku`) and GPT/Codex name families have fallback pricing and are marked estimated. Completely unrecognized names still report null cost.
 
 ## First scan can be slow
 

@@ -16,17 +16,30 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
-_DEFAULT_ROOTS = [
-    Path.home() / ".claude" / "skills",
-    Path.home() / ".claude" / "scheduled-tasks",
-    Path.home() / ".claude" / "plugins",
-]
-
-
 import re
 
 _VERSION_RE = re.compile(r"^\d+\.\d+")
 _STRUCTURE_NAMES = {"skills", "plugins", "marketplaces", "cache", ".claude"}
+
+
+def _default_roots() -> list[Path]:
+    roots = [
+        Path.home() / ".claude" / "skills",
+        Path.home() / ".claude" / "scheduled-tasks",
+        Path.home() / ".claude" / "plugins",
+    ]
+    # Include project-local skill folders from cwd up to filesystem root.
+    cwd = Path.cwd().resolve()
+    roots.extend(parent / ".claude" / "skills" for parent in [cwd, *cwd.parents])
+    deduped = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(root)
+    return deduped
 
 
 def _slugs_for(skill_md: Path) -> list[str]:
@@ -73,7 +86,7 @@ def scan_catalog(roots=None) -> Dict[str, dict]:
     When a slug resolves to multiple files (nested `skills/skills/`), keep the
     entry with the shallowest path — that's the canonical install.
     """
-    roots = roots or _DEFAULT_ROOTS
+    roots = roots or _default_roots()
     catalog: Dict[str, dict] = {}
     for root in roots:
         if not root.is_dir():

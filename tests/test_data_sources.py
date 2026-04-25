@@ -78,6 +78,21 @@ class DataSourceStatusTests(unittest.TestCase):
         self.assertEqual(by_provider["claude"]["scanned_files"], 1)
         self.assertTrue(status["data_complete"])
 
+    def test_disabled_source_with_cache_is_marked_cached_disabled(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute(
+                "INSERT INTO messages (uuid, session_id, project_slug, provider, type, timestamp) "
+                "VALUES ('u-codex', 's-codex', 'p', 'codex', 'user', '2026-04-19T00:00:00Z')"
+            )
+            c.commit()
+
+        status = data_source_status(Path(self.tmp) / "missing-claude", None, self.db)
+        by_provider = {s["provider"]: s for s in status["sources"]}
+        self.assertEqual(by_provider["codex"]["status"], "disabled")
+        self.assertEqual(by_provider["codex"]["data_state"], "cached_disabled")
+        self.assertIn("claude", status["missing"])
+        self.assertIn("claude", status["incomplete"])
+
 
 if __name__ == "__main__":
     unittest.main()

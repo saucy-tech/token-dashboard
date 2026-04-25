@@ -882,28 +882,31 @@ def daily_token_breakdown(db_path, since=None, until=None, provider: Optional[st
 def skill_breakdown(db_path, since=None, until=None, provider: Optional[str] = None) -> list:
     """Per-skill invocation counts, distinct sessions, last-used timestamp.
 
-    Token attribution per skill is not included: in Claude Code, a Skill's
-    content is loaded via a system-reminder on the next turn, not as the
-    tool_result body — so `result_tokens` on _tool_result rows reflects the
-    activation ack (tiny), not the skill definition (which is what actually
-    fills context). A future schema change (storing tool_use_id on the
-    invocation row) could enable precise attribution; for now we only expose
-    the reliable counts.
+    Includes both direct Skill tool invocations and Task-based dispatches where
+    the Task target is skill-shaped (e.g. "superpowers:brainstorming").
     """
     rng, args = _range_clause(since, until)
     prov, prov_args = _provider_clause(provider)
     sql = f"""
-      SELECT target AS skill,
+      SELECT skill,
              COUNT(*) AS invocations,
              COUNT(DISTINCT session_id) AS sessions,
              MAX(timestamp) AS last_used
-        FROM tool_calls
-       WHERE tool_name = 'Skill' AND target IS NOT NULL AND target != '' {rng}{prov}
-       GROUP BY target
+        FROM (
+          SELECT target AS skill, session_id, timestamp
+            FROM tool_calls
+           WHERE tool_name = 'Skill' AND target IS NOT NULL AND target != '' {rng}{prov}
+          UNION ALL
+          SELECT target AS skill, session_id, timestamp
+            FROM tool_calls
+           WHERE tool_name = 'Task' AND target IS NOT NULL AND target != '' AND INSTR(target, ':') > 0 {rng}{prov}
+        )
+       GROUP BY skill
        ORDER BY invocations DESC
     """
     with connect(db_path) as c:
-        return [dict(r) for r in c.execute(sql, [*args, *prov_args])]
+        query_args = [*args, *prov_args, *args, *prov_args]
+        return [dict(r) for r in c.execute(sql, query_args)]
 
 
 def model_breakdown(db_path, since=None, until=None, provider: Optional[str] = None) -> list:

@@ -272,7 +272,7 @@ export default async function(root) {
       <h4 style="margin:10px 0 6px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;">Known limitations</h4>
       <ul class="muted limitation-list">
         <li>Costs are token-rate estimates. Subscription plans are flat monthly prices and are not allocated per turn.</li>
-        <li>Unknown model IDs are omitted from cost totals unless their name matches a known Claude tier fallback.</li>
+        <li>Unknown model IDs are omitted from cost totals unless their name matches a known fallback family (Claude tiers or GPT/Codex naming).</li>
         <li>Totals include only supported local Claude Code and Codex logs that have been scanned into the SQLite cache.</li>
         <li>Warp and server-side Cowork sessions are not included because they do not have a confirmed local usage source here.</li>
         <li>Plan token limits shown above are approximate and may not match what Anthropic/OpenAI actually enforces at any given time.</li>

@@ -12,20 +12,25 @@ def load_pricing(path: Union[str, Path]) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _tier_from_name(model: str) -> Optional[str]:
+def _tier_from_name(model: str, provider: Optional[str] = None) -> Optional[str]:
     m = (model or "").lower()
+    p = (provider or "").lower()
+    if "codex" in m:
+        return "codex"
+    if (m.startswith("gpt-") or "openai" in m) and p in ("", "codex", "openai"):
+        return "gpt"
     for tier in ("opus", "sonnet", "haiku"):
         if tier in m:
             return tier
     return None
 
 
-def cost_for(model: str, usage: dict, pricing: dict) -> dict:
+def cost_for(model: str, usage: dict, pricing: dict, provider: Optional[str] = None) -> dict:
     """Return {usd, estimated, breakdown}. usd=None when no tier match."""
     rates = pricing["models"].get(model)
     estimated = False
     if rates is None:
-        tier = _tier_from_name(model or "")
+        tier = _tier_from_name(model or "", provider=provider)
         if tier and tier in pricing["tier_fallback"]:
             rates = pricing["tier_fallback"][tier]
             estimated = True

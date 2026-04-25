@@ -146,13 +146,13 @@ export function dataSourcePanel(status, opts = {}) {
   const cachedOnly = sources.filter(s => ['cached_missing', 'cached_disabled', 'cached_no_logs'].includes(s.data_state || ''));
   const waiting = sources.filter(s => ['not_scanned', 'scanned_empty'].includes(s.data_state || ''));
   const title = partial.length || cachedOnly.length || waiting.length ? 'Data coverage' : 'Data sources';
-  let body = 'Enabled source folders have logs and cached sessions. Totals still reflect only supported local logs.';
+  let body = 'Enabled source folders have logs and cached sessions. This panel reflects local cache health, not provider cloud-sync completeness.';
   if (cachedOnly.length) {
-    body = 'Some sources are unavailable now, so totals may include cached data from earlier scans and miss newer local history.';
+    body = 'Some sources are unavailable now, so totals may include cached data from earlier scans and miss newer local history. This is local cache state only.';
   } else if (partial.length) {
-    body = 'Some enabled sources are missing, empty, or not cached yet. Dashboard totals are partial until those sources scan successfully.';
+    body = 'Some enabled sources are missing, empty, or not cached yet. Dashboard totals are partial until those sources scan successfully. This does not validate cloud-side history.';
   } else if (sources.some(s => s.status === 'disabled')) {
-    body = 'Only enabled local sources are scanned. Disabled providers are excluded unless their older cached rows are still in the database.';
+    body = 'Only enabled local sources are scanned. Disabled providers are excluded unless their older cached rows are still in the database. Source status is local-cache only.';
   }
   const compactClass = opts.compact ? ' source-panel-compact' : '';
   return `

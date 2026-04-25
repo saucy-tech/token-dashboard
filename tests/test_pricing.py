@@ -57,6 +57,35 @@ class CostTests(unittest.TestCase):
         self.assertAlmostEqual(c["usd"], 14.00, places=4)
         self.assertFalse(c["estimated"])
 
+    def test_unknown_codex_model_uses_codex_fallback(self):
+        c = cost_for("gpt-5.9-codex-preview", self._u(output_tokens=1_000_000), self.p)
+        self.assertAlmostEqual(c["usd"], 14.00, places=4)
+        self.assertTrue(c["estimated"])
+
+    def test_unknown_openai_model_uses_gpt_fallback(self):
+        c = cost_for("gpt-5.9-experimental", self._u(output_tokens=1_000_000), self.p)
+        self.assertAlmostEqual(c["usd"], 15.00, places=4)
+        self.assertTrue(c["estimated"])
+
+    def test_gpt_prefix_fallback_is_provider_aware(self):
+        codex = cost_for(
+            "gpt-local-lab-model",
+            self._u(output_tokens=1_000_000),
+            self.p,
+            provider="codex",
+        )
+        self.assertAlmostEqual(codex["usd"], 15.00, places=4)
+        self.assertTrue(codex["estimated"])
+
+        claude = cost_for(
+            "gpt-local-lab-model",
+            self._u(output_tokens=1_000_000),
+            self.p,
+            provider="claude",
+        )
+        self.assertIsNone(claude["usd"])
+        self.assertTrue(claude["estimated"])
+
 
 class PlanFormatTests(unittest.TestCase):
     def setUp(self):

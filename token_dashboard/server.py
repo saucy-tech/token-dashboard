@@ -185,7 +185,7 @@ def _attach_prompt_costs(rows: list, pricing: dict) -> None:
             "input_tokens": 0, "output_tokens": 0,
             "cache_read_tokens": r["cache_read_tokens"],
             "cache_create_5m_tokens": 0, "cache_create_1h_tokens": 0,
-        }, pricing)
+        }, pricing, provider=r.get("provider"))
         r["estimated_cost_usd"] = c["usd"]
         r["estimated_cost_partial"] = c["usd"] is None
         r["estimated_cost_estimated"] = c["usd"] is not None and c["estimated"]
@@ -198,7 +198,7 @@ def _row_cost(model: str, row: dict, pricing: dict) -> dict:
         "cache_read_tokens": int(row.get("cache_read_tokens") or 0),
         "cache_create_5m_tokens": int(row.get("cache_create_5m_tokens") or 0),
         "cache_create_1h_tokens": int(row.get("cache_create_1h_tokens") or 0),
-    }, pricing)
+    }, pricing, provider=row.get("provider"))
 
 
 def _delta(current, previous) -> dict:
