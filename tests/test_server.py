@@ -8,8 +8,9 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
-from token_dashboard.db import init_db
+from token_dashboard.db import init_db, DBLockedError
 from token_dashboard.server import build_handler
 
 
@@ -43,6 +44,7 @@ class ServerTests(unittest.TestCase):
 
     def tearDown(self):
         self.httpd.shutdown()
+        self.httpd.server_close()
 
     def _get(self, path):
         return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}").read()
@@ -75,6 +77,24 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(body["cost_partial"])
         self.assertFalse(body["cost_estimated"])
         self.assertEqual(body["estimated_models"], 0)
+
+    def test_overview_json_schema_shape(self):
+        body = json.loads(self._get("/api/overview"))
+        expected = {
+            "sessions",
+            "turns",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_create_5m_tokens",
+            "cache_create_1h_tokens",
+            "cost_usd",
+            "cost_partial",
+            "cost_estimated",
+            "unpriced_models",
+            "estimated_models",
+        }
+        self.assertTrue(expected.issubset(set(body.keys())))
 
     def test_overview_json_can_filter_provider(self):
         body = json.loads(self._get("/api/overview?provider=codex"))
@@ -145,6 +165,26 @@ class ServerTests(unittest.TestCase):
         self.assertIn("estimated_cost_estimated", body[0])
         self.assertIn("estimated_cost_partial", body[0])
 
+    def test_prompts_json_schema_shape(self):
+        body = json.loads(self._get("/api/prompts?limit=10"))
+        expected = {
+            "user_uuid",
+            "assistant_uuid",
+            "session_id",
+            "project_slug",
+            "provider",
+            "model",
+            "prompt_text",
+            "billable_tokens",
+            "cache_read_tokens",
+            "estimated_cost_usd",
+            "estimated_cost_partial",
+            "estimated_cost_estimated",
+            "why_expensive",
+            "cost_drivers",
+        }
+        self.assertTrue(expected.issubset(set(body[0].keys())))
+
     def test_prompts_json_can_filter_provider(self):
         body = json.loads(self._get("/api/prompts?limit=10&provider=codex"))
         self.assertEqual(len(body), 1)
@@ -205,6 +245,43 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(body), 1)
         self.assertEqual(body[0]["session_id"], "s")
 
+    def test_sessions_json_schema_shape(self):
+        body = json.loads(self._get("/api/sessions?limit=1"))
+        expected = {
+            "session_id",
+            "project_slug",
+            "project_name",
+            "provider",
+            "started",
+            "ended",
+            "turns",
+            "tokens",
+            "billable_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_create_5m_tokens",
+            "cache_create_1h_tokens",
+            "primary_model",
+            "model_count",
+            "is_current",
+        }
+        self.assertTrue(expected.issubset(set(body[0].keys())))
+
+    def test_providers_json_schema_shape(self):
+        body = json.loads(self._get("/api/providers"))
+        expected = {
+            "provider",
+            "sessions",
+            "turns",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_create_5m_tokens",
+            "cache_create_1h_tokens",
+        }
+        self.assertTrue(expected.issubset(set(body[0].keys())))
+
     def test_sessions_json_clamps_negative_offset(self):
         body = json.loads(self._get("/api/sessions?limit=1&offset=-12"))
         self.assertEqual(len(body), 1)
@@ -222,6 +299,11 @@ class ServerTests(unittest.TestCase):
         body = self._get("/api/export/sessions.csv?provider=claude").decode("utf-8")
         self.assertIn("session_id", body)
         self.assertIn("s", body)
+
+    def test_export_version_endpoint(self):
+        body = json.loads(self._get("/api/export/version"))
+        self.assertEqual(body["version"], "v1")
+        self.assertEqual(body["format"], "token-dashboard-export")
 
     def test_plan_json(self):
         body = json.loads(self._get("/api/plan"))
@@ -308,6 +390,35 @@ class ServerTests(unittest.TestCase):
 
         body = json.loads(self._post("/api/scan"))
         self.assertIn("messages", body)
+
+
+class ServerLockedDBTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+        try:
+            self.port = _free_port()
+        except PermissionError as e:
+            raise unittest.SkipTest(f"socket bind unavailable: {e}")
+        H = build_handler(self.db, projects_dir="/nonexistent")
+        self.httpd = http.server.HTTPServer(("127.0.0.1", self.port), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_503_on_db_locked(self):
+        with patch("token_dashboard.server.overview_totals", side_effect=DBLockedError("database is locked")):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/overview")
+                self.fail("Expected HTTPError 503")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 503)
+                body = json.loads(e.read())
+                self.assertEqual(body["error"], "database_locked")
+                self.assertIn("retry_after", body)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
+
+class DBLockedError(Exception):
+    """Raised when SQLite returns 'database is locked' after busy_timeout expires."""
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
   path        TEXT PRIMARY KEY,
@@ -157,6 +162,22 @@ def init_db(path: Union[str, Path]) -> None:
         c.commit()
 
 
+def health_check(path: Union[str, Path]) -> dict:
+    """Return lightweight DB health diagnostics for startup checks."""
+    db_path = Path(path)
+    if not db_path.exists():
+        return {"ok": True, "checks": {"exists": False, "quick_check": "not_run"}}
+    try:
+        with sqlite3.connect(db_path) as c:
+            row = c.execute("PRAGMA quick_check").fetchone()
+            result = (row[0] if row else "").strip().lower()
+            if result != "ok":
+                return {"ok": False, "checks": {"exists": True, "quick_check": result or "failed"}}
+    except sqlite3.DatabaseError as exc:
+        return {"ok": False, "checks": {"exists": True, "quick_check": "error", "error": str(exc)}}
+    return {"ok": True, "checks": {"exists": True, "quick_check": "ok"}}
+
+
 def _migrate_create_settings(conn) -> None:
     conn.execute("""
       CREATE TABLE IF NOT EXISTS settings (
@@ -234,6 +255,10 @@ def connect(path: Union[str, Path]):
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            raise DBLockedError(str(e)) from e
+        raise
     finally:
         conn.close()
 
@@ -1187,3 +1212,14 @@ def _insert_snapshot_dimension(
            GROUP BY start_date, {provider_expr}, dimension_key
         """
         conn.execute(sql, [period, end_modifier, dimension, *args])
+
+
+def vacuum_dismissed_tips(path: Union[str, Path], days: int = 30) -> int:
+    """Delete dismissed tips older than `days` days. Returns count deleted."""
+    with connect(path) as conn:
+        cur = conn.execute(
+            "DELETE FROM dismissed_tips WHERE dismissed_at < strftime('%s','now',?)",
+            (f"-{days} days",),
+        )
+        conn.commit()
+        return cur.rowcount

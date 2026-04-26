@@ -35,6 +35,8 @@ class CostTests(unittest.TestCase):
     def test_unknown_unparseable_returns_none(self):
         c = cost_for("custom-local-model", self._u(input_tokens=9999), self.p)
         self.assertIsNone(c["usd"])
+        self.assertTrue(c["estimated"])
+        self.assertEqual(c["breakdown"], {})
 
     def test_cache_read_cheaper_than_input(self):
         c_in = cost_for("claude-opus-4-7", self._u(input_tokens=1_000_000), self.p)

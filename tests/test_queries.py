@@ -218,6 +218,13 @@ class QueryTests(unittest.TestCase):
             310,
         )
 
+    def test_usage_snapshots_cache_daily_rollups(self):
+        ensure_usage_snapshots(self.db)
+        rows = snapshot_rollups(self.db, period="day", limit=10)
+        self.assertEqual([r["start_date"] for r in rows], ["2026-04-10", "2026-04-11"])
+        self.assertEqual(rows[0]["sessions"], 1)
+        self.assertEqual(rows[1]["sessions"], 1)
+
     def test_usage_snapshots_keep_project_and_model_series(self):
         ensure_usage_snapshots(self.db)
 

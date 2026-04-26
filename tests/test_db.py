@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from token_dashboard.db import init_db, connect, recent_prompts, recent_sessions
+from token_dashboard.db import init_db, connect, recent_prompts, recent_sessions, health_check, DBLockedError, vacuum_dismissed_tips
 
 
 class InitDbTests(unittest.TestCase):
@@ -29,6 +29,19 @@ class InitDbTests(unittest.TestCase):
         with connect(self.db_path) as c:
             r = c.execute("SELECT 1 AS one").fetchone()
         self.assertEqual(r["one"], 1)
+
+    def test_health_check_reports_ok_for_valid_db(self):
+        init_db(self.db_path)
+        status = health_check(self.db_path)
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["checks"]["quick_check"], "ok")
+
+    def test_health_check_flags_corrupt_db(self):
+        with open(self.db_path, "wb") as f:
+            f.write(b"not-a-sqlite-db")
+        status = health_check(self.db_path)
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["checks"]["quick_check"], "error")
 
 
 class OffsetQueryTests(unittest.TestCase):
@@ -74,6 +87,34 @@ class OffsetQueryTests(unittest.TestCase):
         second = recent_prompts(self.db_path, limit=1, offset=1)
         self.assertEqual([row["session_id"] for row in first], ["s3"])
         self.assertEqual([row["session_id"] for row in second], ["s2"])
+
+
+class TestDBLockedError(unittest.TestCase):
+    def test_import(self):
+        # DBLockedError must be importable from db
+        self.assertTrue(issubclass(DBLockedError, Exception))
+
+
+class TestVacuumDismissedTips(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+
+    def test_vacuum_removes_old_tips(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT INTO dismissed_tips VALUES ('old_tip', strftime('%s','now','-31 days'))")
+            c.execute("INSERT INTO dismissed_tips VALUES ('new_tip', strftime('%s','now','-1 days'))")
+            c.commit()
+        vacuum_dismissed_tips(self.db)
+        with sqlite3.connect(self.db) as c:
+            rows = c.execute("SELECT tip_key FROM dismissed_tips").fetchall()
+        keys = [r[0] for r in rows]
+        self.assertNotIn('old_tip', keys)
+        self.assertIn('new_tip', keys)
+
+    def test_vacuum_no_crash_empty(self):
+        vacuum_dismissed_tips(self.db)
 
 
 if __name__ == "__main__":

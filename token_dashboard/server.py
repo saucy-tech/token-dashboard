@@ -1,8 +1,9 @@
 """HTTP server: static frontend + JSON endpoints + SSE diff stream."""
 from __future__ import annotations
 
-import http.server
+import atexit
 import csv
+import http.server
 import io
 import json
 import mimetypes
@@ -23,6 +24,8 @@ from .db import (
     current_session,
     sessions_for_project, prompts_for_project,
     usage_limit_settings, set_usage_limit_settings,
+    health_check,
+    DBLockedError,
 )
 
 SLUG_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
@@ -36,6 +39,7 @@ WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
 EVENTS: "queue.Queue[dict]" = queue.Queue(maxsize=200)
+_stop_event = threading.Event()
 
 
 def _enqueue(evt: dict) -> None:
@@ -372,237 +376,261 @@ def build_handler(db_path: str, projects_dir: str, codex_dir: Optional[str] = No
             return self.do_GET()
 
         def do_GET(self):
-            url = urlparse(self.path)
-            qs = parse_qs(url.query or "")
-            path = url.path
-            since = qs.get("since", [None])[0]
-            until = qs.get("until", [None])[0]
-            provider = qs.get("provider", [None])[0]
-            if provider in ("", "all"):
-                provider = None
-            if path in ("/", "/index.html"):
-                return _serve_static(self, "index.html")
-            if path.startswith("/web/"):
-                return _serve_static(self, path[5:])
-            if path == "/api/overview":
-                totals = overview_totals(db_path, since, until, provider=provider)
-                cost_usd = 0.0
-                priced = 0
-                unpriced = 0
-                estimated = 0
-                for m in model_breakdown(db_path, since, until, provider=provider):
-                    c = cost_for(m["model"], m, pricing)
-                    if c["usd"] is not None:
-                        cost_usd += c["usd"]
-                        priced += 1
-                        if c["estimated"]:
-                            estimated += 1
-                    else:
-                        unpriced += 1
-                totals["cost_usd"] = round(cost_usd, 4) if priced else None
-                totals["cost_partial"] = unpriced > 0
-                totals["cost_estimated"] = estimated > 0
-                totals["unpriced_models"] = unpriced
-                totals["estimated_models"] = estimated
-                return _send_json(self, totals)
-            if path == "/api/trends":
-                weeks = _clamp_limit(qs.get("weeks", ["12"])[0], 12)
-                weeks = min(weeks, 52)
-                return _send_json(
-                    self,
-                    _trends_payload(
-                        db_path,
-                        pricing,
-                        provider=provider,
-                        weeks=weeks,
-                        budget_raw=qs.get("budget_usd", [None])[0],
-                    ),
-                )
-            if path.startswith("/api/export/"):
-                target = path[len("/api/export/"):]
-                if "." not in target:
-                    return _send_error(self, 404, "unsupported export target")
-                name, fmt = target.rsplit(".", 1)
-                limit = _clamp_limit(qs.get("limit", ["100"])[0], 100)
-                if name == "prompts":
-                    sort = qs.get("sort", ["tokens"])[0]
-                    rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
-                    _attach_prompt_costs(rows, pricing)
-                    return _export_rows(self, rows, "prompts", fmt)
-                if name == "projects":
-                    return _export_rows(
+            try:
+                url = urlparse(self.path)
+                qs = parse_qs(url.query or "")
+                path = url.path
+                since = qs.get("since", [None])[0]
+                until = qs.get("until", [None])[0]
+                provider = qs.get("provider", [None])[0]
+                if provider in ("", "all"):
+                    provider = None
+                if path in ("/", "/index.html"):
+                    return _serve_static(self, "index.html")
+                if path.startswith("/web/"):
+                    return _serve_static(self, path[5:])
+                if path == "/api/overview":
+                    totals = overview_totals(db_path, since, until, provider=provider)
+                    cost_usd = 0.0
+                    priced = 0
+                    unpriced = 0
+                    estimated = 0
+                    for m in model_breakdown(db_path, since, until, provider=provider):
+                        c = cost_for(m["model"], m, pricing)
+                        if c["usd"] is not None:
+                            cost_usd += c["usd"]
+                            priced += 1
+                            if c["estimated"]:
+                                estimated += 1
+                        else:
+                            unpriced += 1
+                    totals["cost_usd"] = round(cost_usd, 4) if priced else None
+                    totals["cost_partial"] = unpriced > 0
+                    totals["cost_estimated"] = estimated > 0
+                    totals["unpriced_models"] = unpriced
+                    totals["estimated_models"] = estimated
+                    return _send_json(self, totals)
+                if path == "/api/trends":
+                    weeks = _clamp_limit(qs.get("weeks", ["12"])[0], 12)
+                    weeks = min(weeks, 52)
+                    return _send_json(
                         self,
-                        project_summary(db_path, since, until, provider=provider),
-                        "projects",
-                        fmt,
-                    )
-                if name == "sessions":
-                    return _export_rows(
-                        self,
-                        recent_sessions(
+                        _trends_payload(
                             db_path,
-                            limit=limit,
-                            since=since,
-                            until=until,
+                            pricing,
                             provider=provider,
+                            weeks=weeks,
+                            budget_raw=qs.get("budget_usd", [None])[0],
                         ),
-                        "sessions",
-                        fmt,
                     )
-                return _send_error(self, 404, "unsupported export target")
-            if path == "/api/prompts":
-                limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
-                offset = _clamp_offset(qs.get("offset", ["0"])[0], 0)
-                sort = qs.get("sort", ["tokens"])[0]
-                rows = recent_prompts(
-                    db_path,
-                    limit=limit,
-                    sort=sort,
-                    provider=provider,
-                    offset=offset,
-                )
-                _attach_prompt_costs(rows, pricing)
-                return _send_json(self, rows)
-            if path.startswith("/api/projects/") and path.endswith("/sessions"):
-                slug = path[len("/api/projects/"):-len("/sessions")]
-                if not SLUG_RE.match(slug):
-                    return _send_error(self, 400, "invalid project slug")
-                limit = _clamp_limit(qs.get("limit", ["20"])[0], 20)
-                return _send_json(self, sessions_for_project(
-                    db_path, slug, limit=limit, since=since, until=until,
-                ))
-            if path.startswith("/api/projects/") and path.endswith("/prompts"):
-                slug = path[len("/api/projects/"):-len("/prompts")]
-                if not SLUG_RE.match(slug):
-                    return _send_error(self, 400, "invalid project slug")
-                limit = _clamp_limit(qs.get("limit", ["10"])[0], 10)
-                sort = qs.get("sort", ["tokens"])[0]
-                rows = prompts_for_project(
-                    db_path, slug, limit=limit, sort=sort, since=since, until=until,
-                )
-                _attach_prompt_costs(rows, pricing)
-                return _send_json(self, rows)
-            if path == "/api/projects":
-                return _send_json(self, project_summary(db_path, since, until, provider=provider))
-            if path == "/api/tools":
-                return _send_json(self, tool_token_breakdown(db_path, since, until, provider=provider))
-            if path == "/api/sessions":
-                return _send_json(self, recent_sessions(
-                    db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
-                    since=since, until=until, provider=provider,
-                    offset=_clamp_offset(qs.get("offset", ["0"])[0], 0),
-                ))
-            if path == "/api/current-session":
-                settings = usage_limit_settings(db_path)
-                window = settings.get("active_session_window_minutes", 20)
-                session = current_session(db_path, provider=provider)
-                return _send_json(self, {
-                    "session": session,
-                    "freshness": _session_freshness(session, window),
-                    "definition": {
-                        "starts": "first scanned record timestamp for the session_id",
-                        "ends": "latest scanned record timestamp; local logs do not expose an explicit close event",
-                        "current": "latest scanned session in the selected provider scope",
-                        "active": f"marked active only when the latest scanned update is within {window} minutes",
-                        "usage": "sum of token columns for all messages with the session_id",
-                    },
-                })
-            if path == "/api/daily":
-                return _send_json(self, daily_token_breakdown(db_path, since, until, provider=provider))
-            if path == "/api/skills":
-                rows = skill_breakdown(db_path, since, until, provider=provider)
-                catalog = cached_catalog()
-                for r in rows:
-                    info = catalog.get(r["skill"])
-                    r["tokens_per_call"] = info["tokens"] if info else None
-                return _send_json(self, rows)
-            if path == "/api/by-model":
-                rows = model_breakdown(db_path, since, until, provider=provider)
-                for r in rows:
-                    c = cost_for(r["model"], r, pricing)
-                    r["cost_usd"] = c["usd"]
-                    r["cost_estimated"] = c["estimated"]
-                return _send_json(self, rows)
-            if path == "/api/providers":
-                return _send_json(self, provider_breakdown(db_path, since, until, provider=provider))
-            if path == "/api/sources":
-                return _send_json(self, data_source_status(projects_dir, codex_dir, db_path))
-            if path.startswith("/api/sessions/"):
-                sid = path.rsplit("/", 1)[1]
-                return _send_json(self, session_turns(db_path, sid))
-            if path == "/api/tips":
-                if provider not in (None, "claude", "codex"):
-                    return _send_error(self, 400, "invalid provider")
-                return _send_json(self, all_tips(db_path, provider=provider))
-            if path == "/api/plan":
-                return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
-            if path == "/api/settings/usage-limits":
-                return _send_json(self, usage_limit_settings(db_path))
-            if path == "/api/stream":
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Connection", "keep-alive")
+                if path.startswith("/api/export/"):
+                    target = path[len("/api/export/"):]
+                    if target == "version":
+                        return _send_json(self, {"version": "v1", "format": "token-dashboard-export"})
+                    if "." not in target:
+                        return _send_error(self, 404, "unsupported export target")
+                    name, fmt = target.rsplit(".", 1)
+                    limit = _clamp_limit(qs.get("limit", ["100"])[0], 100)
+                    if name == "prompts":
+                        sort = qs.get("sort", ["tokens"])[0]
+                        rows = expensive_prompts(db_path, limit=limit, sort=sort, provider=provider)
+                        _attach_prompt_costs(rows, pricing)
+                        return _export_rows(self, rows, "prompts", fmt)
+                    if name == "projects":
+                        return _export_rows(
+                            self,
+                            project_summary(db_path, since, until, provider=provider),
+                            "projects",
+                            fmt,
+                        )
+                    if name == "sessions":
+                        return _export_rows(
+                            self,
+                            recent_sessions(
+                                db_path,
+                                limit=limit,
+                                since=since,
+                                until=until,
+                                provider=provider,
+                            ),
+                            "sessions",
+                            fmt,
+                        )
+                    return _send_error(self, 404, "unsupported export target")
+                if path == "/api/prompts":
+                    limit = _clamp_limit(qs.get("limit", ["50"])[0], 50)
+                    offset = _clamp_offset(qs.get("offset", ["0"])[0], 0)
+                    sort = qs.get("sort", ["tokens"])[0]
+                    rows = recent_prompts(
+                        db_path,
+                        limit=limit,
+                        sort=sort,
+                        provider=provider,
+                        offset=offset,
+                    )
+                    _attach_prompt_costs(rows, pricing)
+                    return _send_json(self, rows)
+                if path.startswith("/api/projects/") and path.endswith("/sessions"):
+                    slug = path[len("/api/projects/"):-len("/sessions")]
+                    if not SLUG_RE.match(slug):
+                        return _send_error(self, 400, "invalid project slug")
+                    limit = _clamp_limit(qs.get("limit", ["20"])[0], 20)
+                    return _send_json(self, sessions_for_project(
+                        db_path, slug, limit=limit, since=since, until=until,
+                    ))
+                if path.startswith("/api/projects/") and path.endswith("/prompts"):
+                    slug = path[len("/api/projects/"):-len("/prompts")]
+                    if not SLUG_RE.match(slug):
+                        return _send_error(self, 400, "invalid project slug")
+                    limit = _clamp_limit(qs.get("limit", ["10"])[0], 10)
+                    sort = qs.get("sort", ["tokens"])[0]
+                    rows = prompts_for_project(
+                        db_path, slug, limit=limit, sort=sort, since=since, until=until,
+                    )
+                    _attach_prompt_costs(rows, pricing)
+                    return _send_json(self, rows)
+                if path == "/api/projects":
+                    return _send_json(self, project_summary(db_path, since, until, provider=provider))
+                if path == "/api/tools":
+                    return _send_json(self, tool_token_breakdown(db_path, since, until, provider=provider))
+                if path == "/api/sessions":
+                    return _send_json(self, recent_sessions(
+                        db_path, limit=_clamp_limit(qs.get("limit", ["20"])[0], 20),
+                        since=since, until=until, provider=provider,
+                        offset=_clamp_offset(qs.get("offset", ["0"])[0], 0),
+                    ))
+                if path == "/api/current-session":
+                    settings = usage_limit_settings(db_path)
+                    window = settings.get("active_session_window_minutes", 20)
+                    session = current_session(db_path, provider=provider)
+                    return _send_json(self, {
+                        "session": session,
+                        "freshness": _session_freshness(session, window),
+                        "definition": {
+                            "starts": "first scanned record timestamp for the session_id",
+                            "ends": "latest scanned record timestamp; local logs do not expose an explicit close event",
+                            "current": "latest scanned session in the selected provider scope",
+                            "active": f"marked active only when the latest scanned update is within {window} minutes",
+                            "usage": "sum of token columns for all messages with the session_id",
+                        },
+                    })
+                if path == "/api/daily":
+                    return _send_json(self, daily_token_breakdown(db_path, since, until, provider=provider))
+                if path == "/api/skills":
+                    rows = skill_breakdown(db_path, since, until, provider=provider)
+                    catalog = cached_catalog()
+                    for r in rows:
+                        info = catalog.get(r["skill"])
+                        r["tokens_per_call"] = info["tokens"] if info else None
+                        r["tokens_source"] = info["source"] if info else "untracked"
+                    return _send_json(self, rows)
+                if path == "/api/by-model":
+                    rows = model_breakdown(db_path, since, until, provider=provider)
+                    for r in rows:
+                        c = cost_for(r["model"], r, pricing)
+                        r["cost_usd"] = c["usd"]
+                        r["cost_estimated"] = c["estimated"]
+                    return _send_json(self, rows)
+                if path == "/api/providers":
+                    return _send_json(self, provider_breakdown(db_path, since, until, provider=provider))
+                if path == "/api/sources":
+                    return _send_json(self, data_source_status(projects_dir, codex_dir, db_path))
+                if path.startswith("/api/sessions/"):
+                    sid = path.rsplit("/", 1)[1]
+                    return _send_json(self, session_turns(db_path, sid))
+                if path == "/api/tips":
+                    if provider not in (None, "claude", "codex"):
+                        return _send_error(self, 400, "invalid provider")
+                    return _send_json(self, all_tips(db_path, provider=provider))
+                if path == "/api/plan":
+                    return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
+                if path == "/api/settings/usage-limits":
+                    return _send_json(self, usage_limit_settings(db_path))
+                if path == "/api/stream":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
+                    while True:
+                        try:
+                            evt = EVENTS.get(timeout=15)
+                            chunk = f"data: {json.dumps(evt, default=str)}\n\n".encode()
+                        except queue.Empty:
+                            chunk = b": ping\n\n"
+                        try:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            return
+                self.send_response(404)
                 self.end_headers()
-                while True:
-                    try:
-                        evt = EVENTS.get(timeout=15)
-                        chunk = f"data: {json.dumps(evt, default=str)}\n\n".encode()
-                    except queue.Empty:
-                        chunk = b": ping\n\n"
-                    try:
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        return
-            self.send_response(404)
-            self.end_headers()
+            except DBLockedError:
+                _send_json(self, {"error": "database_locked", "retry_after": 2}, status=503)
 
         def do_POST(self):
-            url = urlparse(self.path)
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                return _send_error(self, 400, "invalid Content-Length")
-            if length < 0 or length > MAX_POST_BYTES:
-                return _send_error(self, 413, f"body too large (max {MAX_POST_BYTES} bytes)")
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
-            except json.JSONDecodeError:
-                return _send_error(self, 400, "invalid JSON")
-            if not isinstance(body, dict):
-                return _send_error(self, 400, "body must be a JSON object")
-            if url.path == "/api/plan":
-                set_plan(db_path, body.get("plan", "api"))
-                return _send_json(self, {"ok": True})
-            if url.path == "/api/tips/dismiss":
-                dismiss_tip(db_path, body.get("key", ""))
-                return _send_json(self, {"ok": True})
-            if url.path == "/api/settings/usage-limits":
-                settings = set_usage_limit_settings(db_path, body)
-                return _send_json(self, settings)
-            if url.path == "/api/scan":
-                n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
-                return _send_json(self, n)
-            self.send_response(404)
-            self.end_headers()
+                url = urlparse(self.path)
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    return _send_error(self, 400, "invalid Content-Length")
+                if length < 0 or length > MAX_POST_BYTES:
+                    return _send_error(self, 413, f"body too large (max {MAX_POST_BYTES} bytes)")
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+                except json.JSONDecodeError:
+                    return _send_error(self, 400, "invalid JSON")
+                if not isinstance(body, dict):
+                    return _send_error(self, 400, "body must be a JSON object")
+                if url.path == "/api/plan":
+                    set_plan(db_path, body.get("plan", "api"))
+                    return _send_json(self, {"ok": True})
+                if url.path == "/api/tips/dismiss":
+                    dismiss_tip(db_path, body.get("key", ""))
+                    return _send_json(self, {"ok": True})
+                if url.path == "/api/settings/usage-limits":
+                    settings = set_usage_limit_settings(db_path, body)
+                    return _send_json(self, settings)
+                if url.path == "/api/scan":
+                    n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
+                    return _send_json(self, n)
+                self.send_response(404)
+                self.end_headers()
+            except DBLockedError:
+                _send_json(self, {"error": "database_locked", "retry_after": 2}, status=503)
 
     return H
 
 
 def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None, interval: float = 30.0):
-    while True:
+    while not _stop_event.is_set():
         try:
             n = scan_sources(projects_dir, db_path, codex_home=codex_dir)
             if n["messages"] > 0:
                 _enqueue({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
             _enqueue({"type": "error", "message": str(e)})
-        time.sleep(interval)
+        _stop_event.wait(interval)
 
 
 def run(host: str, port: int, db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
+    _stop_event.clear()
+    db_status = health_check(db_path)
+    if not db_status.get("ok"):
+        check = db_status.get("checks", {}).get("quick_check", "failed")
+        raise RuntimeError(
+            "Database health check failed "
+            f"(quick_check={check}). "
+            "Move or delete the DB file and re-run scan to rebuild it from local logs."
+        )
     threading.Thread(target=_scan_loop, args=(db_path, projects_dir, codex_dir), daemon=True).start()
     H = build_handler(db_path, projects_dir, codex_dir=codex_dir)
     httpd = http.server.ThreadingHTTPServer((host, port), H)
+
+    def _cleanup():
+        _stop_event.set()
+        httpd.server_close()
+
+    atexit.register(_cleanup)
     httpd.serve_forever()
