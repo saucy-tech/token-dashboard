@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -96,6 +97,34 @@ class DataSourceStatusTests(unittest.TestCase):
         self.assertEqual(by_provider["codex"]["data_state"], "cached_disabled")
         self.assertIn("claude", status["missing"])
         self.assertIn("claude", status["incomplete"])
+
+
+class TestDataSourceStatusSkipFields(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+
+    def test_no_log_file_returns_zero_skipped(self):
+        result = data_source_status(self.tmp, None, self.db)
+        self.assertIn("skipped_records", result)
+        self.assertEqual(result["skipped_records"], 0)
+        self.assertIsNone(result["last_scan_error"])
+
+    def test_log_file_returns_last_error(self):
+        log = Path(self.db).parent / "scan_errors.log"
+        log.write_text(
+            json.dumps({"file": "a.jsonl", "record_index": 3, "error": "bad json", "ts": "2026-04-26T00:00:00+00:00"}) + "\n"
+        )
+        result = data_source_status(self.tmp, None, self.db)
+        self.assertEqual(result["skipped_records"], 1)
+        self.assertIsNotNone(result["last_scan_error"])
+        self.assertIn("bad json", result["last_scan_error"])
+
+    def test_no_db_path_returns_zero_skipped(self):
+        result = data_source_status(self.tmp, None, db_path=None)
+        self.assertEqual(result["skipped_records"], 0)
+        self.assertIsNone(result["last_scan_error"])
 
 
 if __name__ == "__main__":

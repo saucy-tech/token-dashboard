@@ -341,12 +341,27 @@ def data_source_status(
     enabled = [s for s in sources if s["status"] != "disabled"]
     missing = [s for s in enabled if not s["connected"]]
     incomplete = [s for s in sources if s["data_state"] not in ("ready", "disabled")]
+    skipped_records = 0
+    last_scan_error = None
+    if db_path:
+        log_path = Path(db_path).parent / "scan_errors.log"
+        if log_path.exists():
+            try:
+                lines = [l for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                skipped_records = len(lines)
+                if lines:
+                    last_err = json.loads(lines[-1])
+                    last_scan_error = last_err.get("error")
+            except Exception:
+                pass
     return {
         "sources": sources,
         "all_connected": bool(enabled) and not missing,
         "data_complete": bool(enabled) and not incomplete,
         "missing": [s["provider"] for s in missing],
         "incomplete": [s["provider"] for s in incomplete],
+        "skipped_records": skipped_records,
+        "last_scan_error": last_scan_error,
     }
 
 
