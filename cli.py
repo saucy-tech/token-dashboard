@@ -102,8 +102,9 @@ def cmd_dashboard(args):
 
 def cmd_doctor(args):
     db = _db_path(args)
-    init_db(db)
     db_status = health_check(db)
+    if db_status.get("ok"):
+        init_db(db)
     sources = data_source_status(_projects(args), _codex(args), db)
     pricing_path = Path(__file__).resolve().parent / "pricing.json"
     pricing = load_pricing(pricing_path)

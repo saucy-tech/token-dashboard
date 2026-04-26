@@ -80,6 +80,25 @@ def _slugs_for(skill_md: Path) -> list[str]:
     return sorted(slugs)
 
 
+def _skill_source(skill_md: Path) -> str:
+    """Classify where a skill came from (global/plugin/scheduled/project-local)."""
+    parts = skill_md.parts
+    try:
+        claude_idx = parts.index(".claude")
+    except ValueError:
+        return "project_local"
+    if claude_idx + 1 >= len(parts):
+        return "project_local"
+    root = parts[claude_idx + 1]
+    if root == "plugins":
+        return "plugin"
+    if root == "scheduled-tasks":
+        return "scheduled_task"
+    if root == "skills":
+        return "global"
+    return "project_local"
+
+
 def scan_catalog(roots=None) -> Dict[str, dict]:
     """Return {slug: {path, chars, tokens}} for every SKILL.md found.
 
@@ -97,13 +116,7 @@ def scan_catalog(roots=None) -> Dict[str, dict]:
             except OSError:
                 continue
             path_text = str(md)
-            source = "project_local"
-            if "/.claude/plugins/" in path_text:
-                source = "plugin"
-            elif "/.claude/scheduled-tasks/" in path_text:
-                source = "scheduled_task"
-            elif "/.claude/skills/" in path_text:
-                source = "global"
+            source = _skill_source(md)
             entry = {"path": path_text, "chars": chars, "tokens": chars // 4, "source": source}
             for slug in _slugs_for(md):
                 prev = catalog.get(slug)
