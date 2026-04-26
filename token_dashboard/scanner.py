@@ -186,9 +186,11 @@ def _evict_prior_snapshots(conn, session_id: str, message_id: str, keep_uuid: st
 
 def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
     """Incrementally ingest a Claude JSONL file."""
-    msgs = tools = 0
+    msgs = tools = skipped = 0
+    errors: list = []
     end_offset = start_byte
     bytes_read = 0
+    lineno = 0
     with open(path, "rb") as fb:
         if start_byte:
             fb.seek(start_byte)
@@ -197,12 +199,15 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
             if not raw:
                 break
             bytes_read += len(raw)
+            lineno += 1
             if not raw.endswith(b"\n"):
                 break
             line_end = fb.tell()
             try:
                 line = raw.decode("utf-8", errors="replace").strip()
-            except Exception:
+            except Exception as e:
+                errors.append({"file": str(path), "line": lineno, "error": str(e)})
+                skipped += 1
                 end_offset = line_end
                 continue
             if not line:
@@ -210,14 +215,20 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                errors.append({"file": str(path), "line": lineno, "error": str(e)})
+                skipped += 1
                 end_offset = line_end
                 continue
             if not isinstance(rec, dict) or "uuid" not in rec or "type" not in rec:
+                errors.append({"file": str(path), "line": lineno, "error": "missing uuid or type"})
+                skipped += 1
                 end_offset = line_end
                 continue
             msg, tlist = parse_record(rec, project_slug)
             if not msg["session_id"] or not msg["timestamp"]:
+                errors.append({"file": str(path), "line": lineno, "error": "missing session_id or timestamp"})
+                skipped += 1
                 end_offset = line_end
                 continue
             if msg["message_id"]:
@@ -234,6 +245,8 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
         "tools": tools,
         "end_offset": end_offset,
         "bytes_read": bytes_read,
+        "skipped": skipped,
+        "errors": errors,
     }
 
 
