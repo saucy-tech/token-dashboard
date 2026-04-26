@@ -66,6 +66,7 @@ export const fmt = {
 
 export async function api(path, opts) {
   const r = await fetch(path, opts);
+  if (r.status === 503) throw new Error('Dashboard is busy (another scan running). Retry in a moment.');
   if (!r.ok) throw new Error(`${path} → ${r.status}`);
   return r.json();
 }
@@ -73,6 +74,7 @@ export async function api(path, opts) {
 export async function optionalApi(path, fallback, opts) {
   const r = await fetch(path, opts);
   if (r.status === 404) return fallback;
+  if (r.status === 503) throw new Error('Dashboard is busy (another scan running). Retry in a moment.');
   if (!r.ok) throw new Error(`${path} → ${r.status}`);
   return r.json();
 }
@@ -154,6 +156,9 @@ export function dataSourcePanel(status, opts = {}) {
   } else if (sources.some(s => s.status === 'disabled')) {
     body = 'Only enabled local sources are scanned. Disabled providers are excluded unless their older cached rows are still in the database. Source status is local-cache only.';
   }
+  const skipWarning = (status?.skipped_records > 0)
+    ? `<div class="source-skip-warning">&#9888; ${fmt.int(status.skipped_records)} record${status.skipped_records === 1 ? '' : 's'} skipped last scan — see scan_errors.log${status.last_scan_error ? `: ${fmt.htmlSafe(status.last_scan_error)}` : ''}</div>`
+    : '';
   const compactClass = opts.compact ? ' source-panel-compact' : '';
   return `
     <div class="card source-panel${compactClass}">
@@ -167,6 +172,7 @@ export function dataSourcePanel(status, opts = {}) {
       <div class="source-grid">
         ${sources.map(sourceCard).join('')}
       </div>
+      ${skipWarning}
     </div>`;
 }
 
