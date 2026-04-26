@@ -1,8 +1,9 @@
 """HTTP server: static frontend + JSON endpoints + SSE diff stream."""
 from __future__ import annotations
 
-import http.server
+import atexit
 import csv
+import http.server
 import io
 import json
 import mimetypes
@@ -614,7 +615,6 @@ def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None,
 
 
 def run(host: str, port: int, db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
-    import atexit
     db_status = health_check(db_path)
     if not db_status.get("ok"):
         check = db_status.get("checks", {}).get("quick_check", "failed")
