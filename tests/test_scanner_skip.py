@@ -99,6 +99,8 @@ class TestScanDirSkips(unittest.TestCase):
         result = scan_dir(str(proj.parent), self.db)
         self.assertIn("skipped", result)
         self.assertEqual(result["skipped"], 1)
+        self.assertGreater(len(result["errors"]), 0)
+        self.assertIn("error", result["errors"][0])
 
 
 class TestScanSourcesErrorLog(unittest.TestCase):

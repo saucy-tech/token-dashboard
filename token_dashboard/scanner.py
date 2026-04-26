@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -293,7 +294,6 @@ def scan_sources(
     db_path: Union[str, Path],
     codex_home: Optional[Union[str, Path]] = None,
 ) -> dict:
-    from datetime import datetime, timezone
     started = time.perf_counter()
     totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0, "skipped": 0}
     all_errors: list = []
@@ -317,8 +317,7 @@ def scan_sources(
         ts = datetime.now(timezone.utc).isoformat()
         with open(log_path, "w", encoding="utf-8") as f:
             for err in all_errors:
-                err["ts"] = ts
-                f.write(json.dumps(err) + "\n")
+                f.write(json.dumps({**err, "ts": ts}) + "\n")
     elif log_path.exists():
         log_path.write_text("", encoding="utf-8")
     try:
