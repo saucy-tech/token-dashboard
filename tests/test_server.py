@@ -8,8 +8,9 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
-from token_dashboard.db import init_db
+from token_dashboard.db import init_db, DBLockedError
 from token_dashboard.server import build_handler
 
 
@@ -43,6 +44,7 @@ class ServerTests(unittest.TestCase):
 
     def tearDown(self):
         self.httpd.shutdown()
+        self.httpd.server_close()
 
     def _get(self, path):
         return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}").read()
@@ -388,6 +390,35 @@ class ServerTests(unittest.TestCase):
 
         body = json.loads(self._post("/api/scan"))
         self.assertIn("messages", body)
+
+
+class ServerLockedDBTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+        try:
+            self.port = _free_port()
+        except PermissionError as e:
+            raise unittest.SkipTest(f"socket bind unavailable: {e}")
+        H = build_handler(self.db, projects_dir="/nonexistent")
+        self.httpd = http.server.HTTPServer(("127.0.0.1", self.port), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_503_on_db_locked(self):
+        with patch("token_dashboard.server.overview_totals", side_effect=DBLockedError("database is locked")):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/overview")
+                self.fail("Expected HTTPError 503")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 503)
+                body = json.loads(e.read())
+                self.assertEqual(body["error"], "database_locked")
+                self.assertIn("retry_after", body)
 
 
 if __name__ == "__main__":
