@@ -206,7 +206,7 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
             try:
                 line = raw.decode("utf-8", errors="replace").strip()
             except Exception as e:
-                errors.append({"file": str(path), "line": lineno, "error": str(e)})
+                errors.append({"file": str(path), "record_index": lineno, "error": str(e)})
                 skipped += 1
                 end_offset = line_end
                 continue
@@ -216,18 +216,18 @@ def scan_file(path: Path, project_slug: str, conn, start_byte: int = 0) -> dict:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError as e:
-                errors.append({"file": str(path), "line": lineno, "error": str(e)})
+                errors.append({"file": str(path), "record_index": lineno, "error": str(e)})
                 skipped += 1
                 end_offset = line_end
                 continue
             if not isinstance(rec, dict) or "uuid" not in rec or "type" not in rec:
-                errors.append({"file": str(path), "line": lineno, "error": "missing uuid or type"})
+                errors.append({"file": str(path), "record_index": lineno, "error": "missing uuid or type"})
                 skipped += 1
                 end_offset = line_end
                 continue
             msg, tlist = parse_record(rec, project_slug)
             if not msg["session_id"] or not msg["timestamp"]:
-                errors.append({"file": str(path), "line": lineno, "error": "missing session_id or timestamp"})
+                errors.append({"file": str(path), "record_index": lineno, "error": "missing session_id or timestamp"})
                 skipped += 1
                 end_offset = line_end
                 continue

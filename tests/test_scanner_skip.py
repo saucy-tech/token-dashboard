@@ -53,7 +53,7 @@ class TestScanFileSkips(unittest.TestCase):
         result = scan_file(p, "proj", self.conn)
         self.assertEqual(result["skipped"], 1)
         self.assertEqual(len(result["errors"]), 1)
-        self.assertIn("line", result["errors"][0])
+        self.assertIn("record_index", result["errors"][0])
         self.assertIn("error", result["errors"][0])
 
     def test_missing_uuid_counted_as_skip(self):
@@ -66,6 +66,13 @@ class TestScanFileSkips(unittest.TestCase):
         p = self._write_jsonl(["", self._valid_record("u1"), ""])
         result = scan_file(p, "proj", self.conn)
         self.assertEqual(result["skipped"], 0)
+
+    def test_missing_session_id_counted_as_skip(self):
+        bad = json.dumps({"uuid": "u1", "type": "user"})  # no sessionId
+        p = self._write_jsonl([bad])
+        result = scan_file(p, "proj", self.conn)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["errors"][0]["error"], "missing session_id or timestamp")
 
     def test_mixed_valid_and_invalid(self):
         p = self._write_jsonl([
