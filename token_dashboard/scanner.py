@@ -254,7 +254,7 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
     """Scan Claude project transcripts from ~/.claude/projects."""
     root = Path(projects_root)
     started = time.perf_counter()
-    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0}
+    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0, "skipped": 0, "errors": []}
     if not root.is_dir():
         return totals
     with connect(db_path) as conn:
@@ -281,6 +281,8 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
             totals["tools"] += n["tools"]
             totals["bytes_read"] += n["bytes_read"]
             totals["files"] += 1
+            totals["skipped"] += n["skipped"]
+            totals["errors"].extend(n["errors"])
         conn.commit()
     totals["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return totals
@@ -291,8 +293,10 @@ def scan_sources(
     db_path: Union[str, Path],
     codex_home: Optional[Union[str, Path]] = None,
 ) -> dict:
+    from datetime import datetime, timezone
     started = time.perf_counter()
-    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0}
+    totals = {"messages": 0, "tools": 0, "files": 0, "files_seen": 0, "bytes_read": 0, "skipped": 0}
+    all_errors: list = []
     providers = []
     if claude_projects_root:
         providers.append(lambda: scan_dir(claude_projects_root, db_path))
@@ -305,7 +309,23 @@ def scan_sources(
         totals["files"] += n["files"]
         totals["files_seen"] += n.get("files_seen", 0)
         totals["bytes_read"] += n.get("bytes_read", 0)
+        totals["skipped"] += n.get("skipped", 0)
+        all_errors.extend(n.get("errors", []))
     totals["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    log_path = Path(db_path).parent / "scan_errors.log"
+    if all_errors:
+        ts = datetime.now(timezone.utc).isoformat()
+        with open(log_path, "w", encoding="utf-8") as f:
+            for err in all_errors:
+                err["ts"] = ts
+                f.write(json.dumps(err) + "\n")
+    elif log_path.exists():
+        log_path.write_text("", encoding="utf-8")
+    try:
+        from .db import vacuum_dismissed_tips
+        vacuum_dismissed_tips(db_path)
+    except Exception:
+        pass
     return totals
 
 

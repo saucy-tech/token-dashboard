@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from token_dashboard.db import init_db
-from token_dashboard.scanner import scan_file
+from token_dashboard.scanner import scan_file, scan_dir, scan_sources
 
 
 def _conn(db_path):
@@ -83,6 +83,52 @@ class TestScanFileSkips(unittest.TestCase):
         result = scan_file(p, "proj", self.conn)
         self.assertEqual(result["messages"], 2)
         self.assertEqual(result["skipped"], 1)
+
+
+class TestScanDirSkips(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+
+    def test_scan_dir_aggregates_skips(self):
+        proj = Path(self.tmp) / "projects" / "myproj"
+        proj.mkdir(parents=True)
+        p = proj / "session.jsonl"
+        p.write_text("bad json\n")
+        result = scan_dir(str(proj.parent), self.db)
+        self.assertIn("skipped", result)
+        self.assertEqual(result["skipped"], 1)
+
+
+class TestScanSourcesErrorLog(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "t.db")
+        init_db(self.db)
+
+    def test_error_log_written_on_skip(self):
+        proj = Path(self.tmp) / "projects" / "myproj"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_text("bad json\n")
+        scan_sources(str(proj.parent), self.db)
+        log = Path(self.db).parent / "scan_errors.log"
+        self.assertTrue(log.exists())
+        lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        self.assertGreater(len(lines), 0)
+        self.assertIn("error", lines[0])
+        self.assertIn("ts", lines[0])
+
+    def test_clean_scan_truncates_error_log(self):
+        # A clean scan (no bad records) should truncate an existing log
+        proj = Path(self.tmp) / "projects" / "myproj"
+        proj.mkdir(parents=True)
+        log = Path(self.db).parent / "scan_errors.log"
+        log.write_text('{"file":"x","record_index":1,"error":"old"}\n')
+        # No JSONL files → no errors
+        scan_sources(str(proj.parent), self.db)
+        self.assertTrue(log.exists())
+        self.assertEqual(log.read_text().strip(), "")
 
 
 if __name__ == "__main__":
