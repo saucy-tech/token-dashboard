@@ -615,6 +615,7 @@ def _scan_loop(db_path: str, projects_dir: str, codex_dir: Optional[str] = None,
 
 
 def run(host: str, port: int, db_path: str, projects_dir: str, codex_dir: Optional[str] = None):
+    _stop_event.clear()
     db_status = health_check(db_path)
     if not db_status.get("ok"):
         check = db_status.get("checks", {}).get("quick_check", "failed")

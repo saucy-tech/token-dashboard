@@ -35,3 +35,11 @@ The first `python3 cli.py scan` on a heavy user's machine can read tens of MB ac
 ## Running two dashboards against the same DB
 
 Both will fight over the SQLite file and you'll see inconsistent numbers and occasional `database is locked` errors. Only run one at a time. If you want to view the dashboard from a second device, use `HOST=0.0.0.0` on the one running machine and point the second device's browser at it.
+
+## Skip reporting covers Claude JSONL only
+
+The `scan_errors.log` and `skipped_records` counter in `/api/sources` only reflect parse errors from Claude Code transcripts (`scan_file()`). Codex session parsing (`scan_codex_home`) silently discards malformed records without contributing to the skip count. Codex parse failures will not appear in the UI warning or log.
+
+## scan_errors.log write is non-atomic
+
+Concurrent scans (background 30s loop + user-triggered scan) can race on `scan_errors.log`. A `/api/sources` read mid-write may return zero skipped records due to the `try/except` catching a partial-line JSON error. For a single-user local tool this is cosmetic — the next `/api/sources` call will see the correct data.
