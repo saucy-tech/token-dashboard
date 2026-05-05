@@ -9,3 +9,5 @@ node_modules/
 .claude/
 docs/superpowers/
 .worktrees/
+CLAUDE.md
+AGENTS.md
