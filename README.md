@@ -77,6 +77,7 @@ python3 cli.py scan          # populate / refresh the local DB, then exit
 python3 cli.py today         # today's totals (terminal)
 python3 cli.py stats         # all-time totals (terminal)
 python3 cli.py tips          # active suggestions (terminal)
+python3 cli.py doctor        # health-check DB, source paths, and pricing catalog
 python3 cli.py dashboard     # scan + serve the UI at http://localhost:8080
 
 # dashboard flags
@@ -111,6 +112,8 @@ Warp is intentionally not a built-in source yet. The current MVP leaves room for
 **Port 8080 already in use.** `PORT=9000 python3 cli.py dashboard`.
 
 **Numbers look wrong / stuck.** The DB lives at `~/.claude/token-dashboard.db`. Delete it and re-run `python3 cli.py scan` to rebuild from scratch.
+
+**Something feels off and you want a quick health check.** Run `python3 cli.py doctor` for a one-shot status of the DB, source paths, and pricing catalog. The dashboard's Sources panel surfaces the same signals (skipped records, scan errors, 503 from a locked DB) live.
 
 **Running the dashboard twice at the same time.** Don't — both processes will fight over the SQLite DB. Stop all instances before starting a new one.
 
