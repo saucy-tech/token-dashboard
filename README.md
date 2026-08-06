@@ -27,7 +27,7 @@ No `pip install`. No Node.js. No build step.
 ## Quickstart
 
 ```bash
-git clone https://github.com/nateherkai/token-dashboard.git
+git clone https://github.com/saucy-tech/token-dashboard.git
 cd token-dashboard
 python3 cli.py dashboard
 ```
@@ -133,7 +133,6 @@ Data flow: `cli.py` → `token_dashboard/scanner.py` → SQLite DB; `token_dashb
 
 ## Further reading
 
-- [`CLAUDE.md`](CLAUDE.md) — conventions and architecture overview (also picked up automatically by Claude Code)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to develop and test
 - [`docs/MVP-PRD.md`](docs/MVP-PRD.md) — MVP scope and next-step product roadmap
 - [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) — rough edges
